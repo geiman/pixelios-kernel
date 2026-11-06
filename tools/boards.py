@@ -131,6 +131,22 @@ _GPU_PINS = {"mali": 0x1C500000, "id_expect": 0x92020010, "shader_present": 0x77
              "s2mpu_g3d0": 0x20080000, "s2mpu_g3d1": 0x20090000, "s2mpu_g3d2": 0x200A0000, "s2mpu_g3d3": 0x200B0000}  # mali = gs101-gpu.dtsi reg (docs/research/17 s2.1), the rest observed g0 2026-10-23 (docs/research/27)
 
 
+_MEM_PINS = {"s2mpu_hsi2": 0x14480000}  # gs101-s2mpu.dtsi:18-26 (soc.json notes.mem); read only by shim/memprobe.c
+
+
+def _mem_macros(values):
+    """MEM_* for shim/memprobe.c: the pinned S2MPU base, and the 1 GiB granules (PA >> 30, the S2MPU's L1 index) of the board's highest DRAM bank."""
+    m = values["mem"]
+    for k, want in _MEM_PINS.items():
+        if k not in m or _num(m[k]) != want:
+            raise ValueError(f"mem.{k} = {m.get(k)!r}: pinned to {want:#x} (tools/boards.py _MEM_PINS, cited in soc.json notes.mem)")
+    base, size = max(((_num(b), _num(s)) for b, s in values["dram_banks"]), key=lambda bs: bs[0])
+    if base & ((1 << 30) - 1) or size & ((1 << 30) - 1) or (base + size) >> 30 > 64:
+        raise ValueError(f"highest dram bank {base:#x}+{size:#x}: must be whole 1 GiB granules below 64 GiB for the S2MPU dump")
+    return [f"#define MEM_{k.upper()} {_num(v):#x}UL" for k, v in sorted(m.items())] + [
+        f"#define MEM_HIGH_GB_FIRST {base >> 30:#x}u", f"#define MEM_HIGH_GB_LAST {(base + size - 1) >> 30:#x}u"]
+
+
 def _gpu_job_values():
     """The numeric values shim/gpujob.c writes, DERIVED from the kbase field definitions (every field with its cite in docs/research/28-gpu-stage2-job.md;
     kbase = android-gs-bluejay-6.1-android16 mali_kbase, local copies in ~/pixelios-artifacts/refs/gpu-stage2/). tools/test_boards_gpuclk.py pins the results."""
@@ -411,6 +427,8 @@ def c_header(board: str) -> str:
         lines += _touch_macros(values)
     if "acpm" in values:
         lines += _acpm_macros(values)
+    if "mem" in values:
+        lines += _mem_macros(values)
     lines.append(f"#define BOARD_BLUEJAY {1 if this_soc == 'GS101' else 0}")
     lines.append(f"#define BOOT_HEADER_VERSION {values['boot_header_version']}")
     return "\n".join(lines) + "\n"
