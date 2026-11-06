@@ -82,6 +82,14 @@ const char *loader_boot(uintptr_t dtb)
 		return "no SWEETXNU payload";
 	if (payload_addr > rd_end || rd_end - payload_addr < sizeof(struct payload))
 		return "truncated payload header";
+	if (payload_addr & 7) {
+		uintptr_t aligned = shim_align_payload(rd_start, payload_addr, rd_end);
+		con_hex2("PAYLOAD", "unaligned=", payload_addr, "moved to=", aligned);
+		if (!aligned)
+			return "payload cannot be aligned";
+		rd_end -= payload_addr - aligned;
+		payload_addr = aligned;
+	}
 	const struct payload *p = (const struct payload *)payload_addr;
 	if (p->version != 1 || (p->adt_off & 7) || (payload_addr & 7))
 		return "bad payload header";
