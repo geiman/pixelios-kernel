@@ -63,6 +63,7 @@ case "$qr" in off|0) ;; *[!0-9]*) echo "--qr needs seconds or off" >&2; exit 2 ;
 [ -n "$extra" ] && args="$args $extra"
 [ -z "$overlay" ] || case " $args " in *" ufsroot="*) echo "--overlay: ufsroot= in --args is refused (the overlay writes userdata only, AGENTS.md rule 1)" >&2; exit 2 ;; esac   # review 0117 F1
 [ -z "$overlay" ] || case " $args " in *" sweetdev="*) ;; *) args="$args sweetdev=1" ;; esac   # never doubled: an explicit sweetdev= in --args is kept
+# ${a[@]+"${a[@]}"}: macOS /bin/bash 3.2 treats an empty array as unset under set -u
 railsarg=(); words=""; dvfsarg=(); hoarg=(); [ "$handover" = 0 ] || hoarg=(--gpu-handover); [ "$wlan" = 0 ] || hoarg+=(--wlan-hold)
 [ "$rails" = 0 ] || words=rails
 if [ "$dvfs" = read ]; then words="${words:+$words,}dvfsr"
@@ -74,7 +75,7 @@ if [ -n "$overlay" ]; then ov=$(mktemp /tmp/devoverlay.XXXXXX.bin); python3 -I t
 if [ "$board" = raven ] && [ "$adt_set" = 0 ]; then
 	tadt=$(mktemp /tmp/raven-adt.XXXXXX); python3 -I tools/mkadt.py --board raven "$tadt" >&2; adt=$tadt
 fi
-python3 -I tools/mkpayload.py "$kernel" "$adt" "$p" --board "$board" --cmdline "$args" "${rdarg[@]}" ${wlanfw:+--wlanfw "$wlanfw"} >/dev/null
-META_ARGS="$args" XNU_UFS=1 shim/build.sh --board "$board" --avb --boot-xnu "$p" "${railsarg[@]}" "${dvfsarg[@]}" "${hoarg[@]}" >/dev/null
+python3 -I tools/mkpayload.py "$kernel" "$adt" "$p" --board "$board" --cmdline "$args" ${rdarg[@]+"${rdarg[@]}"} ${wlanfw:+--wlanfw "$wlanfw"} >/dev/null
+META_ARGS="$args" XNU_UFS=1 shim/build.sh --board "$board" --avb --boot-xnu "$p" ${railsarg[@]+"${railsarg[@]}"} ${dvfsarg[@]+"${dvfsarg[@]}"} ${hoarg[@]+"${hoarg[@]}"} >/dev/null
 [ -z "$out" ] || cp shim/out/shim-boot-avb.img "$out"
 echo "boot-args: $args"; echo "image: ${out:-shim/out/shim-boot-avb.img}"
