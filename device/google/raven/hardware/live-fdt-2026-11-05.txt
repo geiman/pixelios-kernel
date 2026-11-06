@@ -1,0 +1,42 @@
+Pixel 6 Pro (raven), live FDT excerpt, captured 2026-11-05 from the running Android with `adb root` + `cat /sys/firmware/fdt`, decompiled with dtc 1.8.1.
+Sanitized: no serial number, IMEI or MAC. The raw dtb is not committed (its /chosen bootargs carry identifiers).
+
+Phone: ro.product.device=raven, model "Raven DVT", compatible "google,GS101 Raven", "google,GS101"
+Bootloader: slider-1.3-11170084   OS: LineageOS 21.0-20240304-NIGHTLY-raven (build UQ1A.240205.004)
+Root cells: #address-cells = 2, #size-cells = 1
+
+/memory nodes (base, size):
+  memory@80000000   0x0_80000000  0x37200000
+  memory@c0000000   0x0_c0000000  0x20000000
+  memory@e2500000   0x0_e2500000  0x1db00000
+  memory@880000000  0x8_80000000  0x80000000
+  memory@900000000  0x9_00000000  0x80000000
+  memory@980000000  0x9_80000000  0x80000000
+  memory@a00000000  0xa_00000000  0x80000000
+  memory@a80000000  0xa_80000000  0x80000000
+  -> high range 0x8_80000000 .. 0xb_00000000 (10 GiB) is contiguous; low banks have holes at 0xb7200000..0xc0000000 and 0xe0000000..0xe2500000.
+
+/reserved-memory (27 children):
+  No child has a fixed `reg` inside 0x8_80000000 .. 0xb_00000000.
+  8 children have no `reg`, only size + alloc-ranges that include the high range (dynamic pools Linux allocates; same names bluejay
+  showed as "no-map no" with no base): vstream 0x4800000, vframe 0x20000000, vscaler 0x3400000, faceauth_tpu 0x2000000,
+  famodel 0x4b00000, faimg 0x3c00000, farawimg 0x10000000, faprev 0x3000000.
+  abl_reserved: abl@f8800000 { reg = <0x00 0xf8800000 0x1000000>; no-map; }
+
+Display:
+  panel compatible "samsung,s6e3hc3"; bootargs exynos_drm.panel_name=samsung-s6e3hc3. No splash / framebuffer node.
+
+Touch (spi_11: spi@10D40000, compatible samsung,exynos-spi, status okay):
+  touchscreen@0 { status = "ok"; reg = <0>; compatible = "sec,sec_ts"; spi-max-frequency = <10000000>; spi-cpol; spi-cpha;
+    sec,firmware_name = "s6sy79x.bin"; sec,max_coords = <1440 3120>;
+    sec,irq_gpio = <&gpa9 0 0>; sec,reset_gpio = <&gpp26 0 0>;
+    vdd-supply = S2MPG10_LDO25 (LDO25M); avdd-supply = S2MPG10_LDO26 (LDO26M);
+    controller-data { samsung,spi-chip-select-mode = <0>; } }
+  touchscreen@1: status disabled.
+  on_state pins:  ts-irq gpa9-0; ts-reset gpp26-0; ap2aoc gpp26-1; aoc2ap-irq gpa8-6 (pull-down);
+                  ts_spi_bus_active gpp23-0,1,2 function 2; ts_spi_cs_active gpp23-3 function 2.
+  off_state pins: gpp23-0..3 function 0.
+
+userdata (read from sysfs on the running phone):
+  /dev/block/by-name/userdata -> /dev/block/sda27, start 18321200 x 512 B (= 4K block 0x22F1E6), size 231248040 x 512 B
+  = 28906005 x 4 KiB = 112914 MiB. Logical block size 4096.

@@ -1,0 +1,37 @@
+{
+  "name": "Pixel 6 Pro",
+  "codename": "raven",
+  "soc": "google/gs101",
+  "status": "shim probe runs (2026-11-05: display, 8 CPUs, UFS HS-G4, GPT); XNU not tried",
+  "dram_banks": [
+    ["0x80000000", "0x37200000"],
+    ["0xc0000000", "0x20000000"],
+    ["0xe2500000", "0x1db00000"],
+    ["0x880000000", "0x280000000"]
+  ],
+  "xnu_ram": ["0x880000000", "0x100000000"],
+  "fb_base": "0xfac00000",
+  "fb_size": "0x1123800",
+  "fb_width": 1440,
+  "fb_height": 3120,
+  "fb_stride": 5760,
+  "key_pins": [
+    [0, "0x174D0000", "0xE0", 1],
+    [1, "0x174E0000", "0x40", 1],
+    [2, "0x174E0000", "0x20", 3]
+  ],
+  "key_active_low": 1,
+  "userdata_mib": 112914,
+  "usb_dma_range": ["0xf8800000", "0x1000000"],
+  "notes": {
+    "dram_banks": "MEASURED on the phone (hardware/live-fdt-2026-11-05.txt, bootloader slider-1.3-11170084): three low /memory nodes with holes between them, listed as they are, and five contiguous 2 GiB nodes 0x880000000..0xb00000000, merged here into one 10 GiB bank (tools/mkpayload.py needs the kernel's RAM inside one bank). No fixed reserved-memory reg lies in the high range; eight dynamic pools (vframe, farawimg, ...) have alloc-ranges covering it, but no base: Linux allocates them, and bluejay's FDT shows the same pools.",
+    "xnu_ram": "guess: bluejay's proven 4 GiB at the start of the hole-free high range, 32 MiB aligned. The other 6 GiB of the high range stay unused until a larger size is tried under XNU.",
+    "fb": "read from source: Linux master d68ce4e71248 arch/arm64/boot/dts/exynos/google/gs101-raven.dts: cont_splash_mem reg <0xfac00000 (1440*3120*4)> = 0x1123800, simple-framebuffer 1440x3120, stride 1440*4, a8r8g8b8. The live FDT has no splash node (bluejay's neither); panel is samsung,s6e3hc3 (live FDT). OBSERVED on hardware 2026-11-05 (hardware/probe-run1-2026-11-05.txt): the shim drew its report on the panel with these values after DECON TRIG 0x3070 -> 0x3061.",
+    "key_pins": "read from source: identical to bluejay because all three keys are defined in gs101-pixel-common.dtsi (Linux master d68ce4e71248, gpio-keys :40-65, key_voldown gpa7-3 :806, key_volup gpa8-1 :813, key_power gpa10-1 :855), which gs101-raven.dts includes unchanged. Bank bases/offsets as bluejay's notes cite (pinctrl-exynos-arm64.c). Not observed on raven.",
+    "key_active_low": "read from source: GPIO_ACTIVE_LOW in gs101-pixel-common.dtsi :47 and following.",
+    "userdata_mib": "MEASURED on the phone: sysfs sda27 start 18321200, size 231248040 x 512 B = 28906005 x 4 KiB = 112914 MiB; first 4K block 0x22F1E6. Same geometry as bluejay's GPT read.",
+    "usb_dma_range": "MEASURED in the live FDT: reserved-memory abl@f8800000, no-map, 16 MiB, the same range bluejay's ABL reserves for its DWC3 event buffer. OBSERVED 2026-11-05: GEVNTADR 0xF8B9C000 lies inside it (hardware/probe-run1-2026-11-05.txt). Re-measure after a bootloader update.",
+    "touch": "MEASURED in the live FDT: Samsung S6SY79x (compatible sec,sec_ts, firmware s6sy79x.bin), not bluejay's ST FTM5, so no touch_* keys here: they would enable the FTM5 probe and driver against the wrong chip. Same wiring as bluejay: spi_11 at 0x10D40000, max 10 MHz, SPI mode 3 (cpol, cpha), gpp23-0..2 function 2, IRQ gpa9-0, reset gpp26-0, gpp26-1 (ap2aoc, bluejay's TS_SPI_SEL), rails S2MPG10 LDO25M/LDO26M, max-coords 1440x3120. One difference: raven's CS gpp23-3 is pin function 2 (hardware CS); bluejay's is a GPIO. A sec_ts driver is new work.",
+    "phone_tools": "tools/fboot.sh and tools/phone-guard refuse any product but bluejay (AGENTS.md hard rule 2). Booting raven needs that guard extended to raven in a reviewed change; until then the user runs fastboot by hand."
+  }
+}

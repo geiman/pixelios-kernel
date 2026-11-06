@@ -1,0 +1,24 @@
+Pixel 6 Pro (raven), shim probe run 1, 2026-11-05.
+Image: shim/out/raven/shim-boot-avb.img (default build: --board raven --avb), Arm GNU Toolchain 15.2.rel1, bootloader slider-1.3-11170084.
+Boot: `fastboot boot` of the AVB-footed v4 image, accepted on the first try (unsigned variant not tried).
+Source: transcribed by eye from photos of the on-screen replay (pages 1-7); digits may contain transcription errors.
+pstore: NOT recovered. After the shim's PSCI reset, console-ramoops-0 held only the bootloader's next-boot log (no PIXELIOS marker,
+43160 bytes), so ABL reuses/overwrites the zone. Use the photo pager or a --usb-gadget build for logs.
+
+Observed:
+  FB board fallback (no framebuffer node; board.json values used); text drawn on the panel at 1440x3120 -> display handoff works
+  ENTRY EL 2
+  PSTORE ramoops node in live FDT, base/size 0xFD3FF000/0x400000, zone inside reserved ramoops_mem@fd3ff000, write enabled
+  WDT CL0 WTCON=0001AF39 -> stopped 0001AF18; WDT CL1 WTCON=00018021 -> stopped 00018000 (both armed by ABL)
+  DECON TRIG before=00003070 after=00003061
+  boot CPU MIDR 412FD050 (A55), MPIDR 81000000, MMFR0 101122 (PARange 40-bit, 16K granule), no PAC
+  CNTFRQ 0x1770000 (24.576 MHz); GICD_TYPER 79041E; PSCI_VERSION 0x10001 (1.1)
+  secondary CPUs 1-7: PSCI CPU_ON ret=0, all reported; MPIDR 0x81000n00; MIDR A55 x4 (412FD050), A76 x2 (414FD0B0), X1 x2 (411FD440)
+  FDT memory: same 8 nodes as hardware/live-fdt-2026-11-05.txt; reserved list as Android's (ect_binary, tpu_fw, gsa, aoc, abl, cp_*, ...)
+  UFS: hce=1 hcs=10F cap=1303FF1F ver=300 (ABL left the host up, link down); UFSDIAG survey without faults
+  UFSINIT cold re-init: linkstartup ok on 2nd attempt, 2 lanes, HS gear 4 rx/tx
+  UFS buffers below 4G (bank 7 = 0x80000000); NOP/TUR/READ CAPACITY ok
+  LUN0 last=01DC03FF, LUN1/2 last=00001FFF, LUN3 last=000003FF, block 0x1000
+  GPT read: 0x1B entries, userdata first=0022F1E6 last=01DC03FA (matches the sysfs measurement)
+  USB: DWC3 0x3331 (dwc31), device mode, SS, GEVNTADR F8B9C000 (512 B) inside reserved abl@f8800000, clear of shim and ramoops
+  PROBE complete; replaying log
