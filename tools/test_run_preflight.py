@@ -28,8 +28,11 @@ class T(unittest.TestCase):
         put(r + "/known.txt", "debug\txnu\ncpus\txnu\nnoprogress\txnu\nsweettouchpoke\tpatch:0093\n")
         put(r + "/extra.txt", "")
         put(r + "/flashed.txt", "9223c0f2aa 2026-10-24T13:01:14Z /x.img\n")
+        # xrun requires CAM_HOST (tools/envfile.py) before the checks these tests reach: a fixture .env, so the result does not
+        # depend on (and never reads) the developer's .env; .invalid never resolves; *.txt keeps the fixture repo clean
+        put(r + "/fixture-env.txt", "CAM_HOST=camera.invalid\n")
         self.env = dict(os.environ, PREFLIGHT_ROOT=r, PREFLIGHT_KNOWN=r + "/known.txt", PREFLIGHT_EXTRA=r + "/extra.txt",
-                        FLASH_STATE=r + "/flashed.txt", RUNS_ROOT=r, PHONE_LOCK_DIR=r + "/lock")
+                        FLASH_STATE=r + "/flashed.txt", RUNS_ROOT=r, PHONE_LOCK_DIR=r + "/lock", PIXOS_ENV_FILE=r + "/fixture-env.txt")
 
     def tearDown(self):
         self.t.cleanup()
