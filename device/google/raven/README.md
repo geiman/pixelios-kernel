@@ -35,4 +35,8 @@ SoC: `soc/google/gs101`, shared with bluejay, so every SoC-level value (GIC, tim
    image ran on the first try; report on the panel, all 8 CPUs, UFS cold re-init to HS-G4 and a full GPT read. pstore does not
    survive the reset on raven (ABL overwrites the zone), so read logs from the photo pager or a `--usb-gadget` build.
 
-3. **XNU to launchd** with the ramdisk payload, and then display, keys and touch for raven.
+3. **XNU to the root mount.** **Done 2026-11-05** (`hardware/xnu-run1-2-2026-11-05.txt`): with PixOS's CI kernel, XNU draws
+   on the 1440x3120 panel, passes its self-tests, finds `userdata` read-only over UFS (DMA in high RAM) and retries the root mount,
+   since userdata holds LineageOS data. Needed `shim_align_payload`: LineageOS's vendor ramdisk leaves the payload unaligned.
+
+4. **launchd and beyond** need an iOS root in `userdata`, which erases Android's data there; then touch (`sec_ts`) for raven.

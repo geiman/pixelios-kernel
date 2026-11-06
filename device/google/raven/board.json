@@ -2,7 +2,7 @@
   "name": "Pixel 6 Pro",
   "codename": "raven",
   "soc": "google/gs101",
-  "status": "shim probe runs (2026-11-05: display, 8 CPUs, UFS HS-G4, GPT); XNU not tried",
+  "status": "XNU boots to the root mount (2026-11-05, 1 CPU, no iOS root yet)",
   "dram_banks": [
     ["0x80000000", "0x37200000"],
     ["0xc0000000", "0x20000000"],

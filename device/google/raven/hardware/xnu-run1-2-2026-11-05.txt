@@ -1,0 +1,23 @@
+Pixel 6 Pro (raven), first XNU boots, 2026-11-05. Bootloader slider-1.3-11170084, LineageOS 21 vendor_boot.
+Kernel: PixOS CI run 40326139140 (commit 04457e5), kernel.development.sweet sha256 26d6679ce244447353ad71a73a52cb241f729bc80c1783d0e1295c4a4118c882.
+ADT: tools/mkadt.py --board raven (xnu_ram 0x880000000 + 4 GiB). Boot-args: tools/build-xnu-image.sh defaults (cpus=1, rd=ufsroot0, no ufsrw).
+Source: transcribed by eye from photos; digits may contain transcription errors.
+
+Run 1 (shim/out/raven-xnu1, shim at 32e509f): shim panic before XNU.
+  INITRD lo=86000000 hi=88A14933; PANIC SYNC ESR 96000021 (alignment fault) ELR 80006F68 (loader_boot, ldr w0,[x7,#8])
+  FAR 87A10A2A. Cause: ABL concatenates vendor_boot's ramdisk (0x1A10A22 bytes, 2 mod 8) + our ramdisk + bootconfig (0xFA1),
+  so the SWEETXNU payload began at 87A10A22; the shim runs with the MMU off and the header load faulted.
+
+Run 2 (shim/out/raven-xnu2, shim_align_payload fix): XNU boots to the root mount.
+  shim: PAYLOAD unaligned=87A10A22 moved to=87A10A20; PHYS/VIRT FFFFFE0006000000/ENTRY FFFFFE0007498488
+  SWEET FB: AppleCLCD 1440x3120 stride 5760 at fac00000, presented as 1440x3120
+  SWEET CPU: requested=1 selected=1 (limit=8); cpu=0 mpidr=0x0 EL1 came alive, SGI1 OK; midr=0x412fd050 cntfrq=24576000 (~1184 MHz)
+  MAC framework, SWEET AMFI / Sandbox / dyld policy stand-ins, HFS hfs-627.100.6 registered
+  zone_init, VM bootstrap, IOKit, Firehose, scheduler, serial KDP; iBoot version: sweet-shim
+  device-tree platform expert; SWEET RST RST_STAT=0x000c0000; AKS, WDT, SURF, HID buttons + touch registered, BATTERY static fallback
+  DLIL SUM16 and all Skywalk self-tests PASSED; bsd_autoconf; lo0/gif0/stf0 attached
+  SWEET UFS: command 0x00 failed: ocs 0x0 upiu 0x21 response 0x1 status 0x2 (first TEST UNIT READY: unit attention, retried)
+  SWEET UFS: "userdata" on LUN 0: first block 0x22f1e6, 112914 MiB, read-only, DMA at 0x88457c000
+  SWEET KEYS: 3 keys, active-low=1, first read in 30 s
+  BSD root: ufsroot0, major 1, minor 0; hfs_ValidateHFSPlusVolumeHeader: unknown Volume Signature : e965; hfs_mountfs error=22
+  cannot mount root, errno = 19; mount(2..5) failed, retrying (expected: userdata holds LineageOS data, not an HFS root)
