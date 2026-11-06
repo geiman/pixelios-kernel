@@ -8,7 +8,9 @@
 #include <string.h>
 
 struct fdt_builder {
-	uint8_t buf[12288];
+	/* The FDT spec requires an 8-byte-aligned blob and fdt.c checks the /memreserve/ block's absolute alignment;
+	 * Apple clang may place an unaligned struct at a 4-byte boundary, which failed fdt_host_test on macOS. */
+	uint8_t buf[12288] __attribute__((aligned(8)));
 	uint32_t struct_pos;
 	uint32_t str_pos;
 	uint32_t rsv_pos;	/* next free /memreserve/ slot (starts at 40) */
