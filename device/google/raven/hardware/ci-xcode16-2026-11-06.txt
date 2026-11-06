@@ -1,0 +1,23 @@
+Pixel 6 Pro (raven), first CI kernel built with Xcode 16.0, 2026-11-06. Boot raven-xnu12-ci.
+Result (observed by the user on the panel): lock screen, touch works.
+
+Why: GitHub retired the macos-14 runners (Xcode 15) on 2026-11-02 (actions/runner-images#15226); the kernel job failed with
+"The configuration 'macos-14-arm64-us-default' is not supported" (run 42231239437). Supported images start at Xcode 16.0.
+
+Evidence for Xcode 16.0 (all observed 2026-11-06):
+  - Probe run 42236694868 (branch ci/macos15-probe, macos-15-intel, Xcode 16.0 16A242d), patches 0001-0147 (140 applied, the
+    same 4 upstream skips): all 17 generated DriverKit *.iig.cpp identical to a local Xcode 15.4 build of the same stack apart
+    from line 1 (banner "iig(DriverKit-286 Aug  9 2024" vs "Mar 29 2024"); all 17 generated headers identical.
+  - Kernel vs the local Xcode 15.4 build: compiler differences only (502 OUTLINED_FUNCTION_* helpers, __text 8826652 ->
+    8813856 bytes, AdvSIMD shape changes). Instruction scan: no mnemonic outside the set gs101 runs except one "subg", which is
+    data (the K256 SHA-256 table inside __hib_text, disassembled; the 15.4 kernel names the same table _K).
+  - Workflow change (commit bee145a): Xcode 16.0 pinned, step "iig version" fails the job unless every *.iig.cpp comes from
+    DriverKit-286 (checked against both trees and a mutated banner), default runner macos-15-intel (macos-15 arm64 jobs were not
+    acquired twice), workflow_dispatch input "runner".
+
+CI run 42240099790 (geiman/pixelios-kernel, wip/raven-sec-ts-xnu, commit bee145a): green, iig DriverKit-286,
+  kernel.development.sweet sha256 ed7a5d4cd34dc723b5f051b5245963c1685e9660919e31765b01f9da8e682067
+  (~/pixelios-artifacts/ci-42240099790).
+Image: raven-xnu11-touch's ADT and boot-args, mkpayload --board raven, shim --touch-probe=rails;
+  shim/out/raven-xnu12-ci/shim-boot-avb.img sha256 7486c7e21b0adc8f1bf0427e303958eb00e04c273690205fe15a2524edcdda8e.
+Not checked: the XNU log of this run; bluejay with an Xcode 16.0 kernel.
