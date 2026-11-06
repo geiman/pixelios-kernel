@@ -1,0 +1,21 @@
+Pixel 6 Pro (raven): SPI11 / touch device-tree properties, read 2026-11-06 from the running LineageOS Recovery kernel
+(adb shell, /proc/device-tree; ro.build.fingerprint google/raven/raven:14/UQ1A.240205.002/11224170, kernel
+5.10.177-android13-4-00003-ga7208022a7ea-ab10815828). Read-only.
+
+Observed (od -tx1 of each property):
+  /spi@10D40000: compatible "samsung,exynos-spi", status "okay", samsung,spi-fifosize = 0x40, swap-mode present but EMPTY,
+    NO dma-mode property, cs-gpios present (controller node; not the per-device "cs-gpio" the driver reads).
+  /spi@10D40000/touchscreen@0: spi-cpol, spi-cpha, spi-max-frequency = 0x00989680 (10 MHz), reg = 0, status "okay".
+  /spi@10D40000/touchscreen@0/controller-data: samsung,spi-chip-select-mode = 0, samsung,spi-feedback-delay = 0.
+
+What the stock driver does with that (read from source, kernel/gs 6e771b230c52 drivers/spi/spi-s3c64xx.c):
+  - no dma-mode -> sci->dma_mode = CPU_MODE (:1487-1490).
+  - fifosize 0x40 -> fifo_lvl_mask = (0x40 << 1) - 1 = 0x7f (:1776-1784), fifo_lvl = (0x7f >> 1) + 1 = 64 (:959).
+  - CPU mode, xfer->len > 64: the transfer is sent as 64-byte chunks (:1002-1011, loop :1107-1124); between chunks
+    flush_fifo() (:1105) = CH_CFG TX/RX off, PACKET_CNT 0, SW_RST set, drain TX/RX, SW_RST clear, MODE_CFG DMA bits clear.
+  - chip-select-mode 0 -> MANUAL_CS_MODE (:1224-1232); enable_cs() writes SLAVE_SEL active for each chunk (:660-664, manual branch), and
+    disable_cs() runs once, after the last transfer of the message (:1157-1158, :745-760): CS stays asserted across chunks.
+  - swap-mode empty -> of_property_read_u32 fails -> NO_SWAP_MODE (:1492-1496); 8-bit words write SWAP_CFG 0 anyway (:823-824).
+  - feedback delay: writel(cs->fb_delay & 0x3, FB_CLK) per message (:976) -> 0 on raven (bluejay's DT has 1).
+So a READ_ALL_EVENT reply above 64 bytes is clocked by the stock Linux driver on raven exactly as 64-byte bursts with a channel
+reset between them under one chip select, the shape xnu 0146's tg_cs_stream + tg_abl_burst use (review 1 F1).

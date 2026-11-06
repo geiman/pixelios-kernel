@@ -1,0 +1,684 @@
+SWEET gs101 touch: Samsung sec_ts (S6SY79x, Pixel 6 Pro raven) protocol in the polled SPI11 driver, selected by /sweet-touch "protocol" = "sec_ts" (absent = FTM5, bluejay unchanged). New bsd/dev/sweet_sec_ts.h (pure framing / event decode, host-tested by shim/sweet_sec_ts_host_test.c); SPI mode 3, reset + boot-complete, identify, SET_TOUCHFUNCTION + SENSE_ON, READ_ONE_EVENT / READ_ALL_EVENT polling.
+--- /dev/null
++++ b/bsd/dev/sweet_sec_ts.h
+@@ -0,0 +1,247 @@
++/*
++ * Samsung sec_ts (S6SY79x, Pixel 6 Pro "raven") SPI wire protocol: the pure parts of the touch driver's sec_ts path
++ * (bsd/dev/sweet_touch_gs101.c, /sweet-touch "protocol" = "sec_ts"). No kernel headers, so shim/sweet_sec_ts_host_test.c
++ * builds this file with plain cc.
++ *
++ * Every constant is from Google's downstream driver, repo kernel/google-modules/touch/sec_touch, commit b23d1f8dfb9e
++ * (branch android-gs-raviole-5.10-android13-qpr3). "sec_ts.c:N" / "sec_ts.h:N" are lines of that tree. The driver is the
++ * SPI build (no I2C_INTERFACE). The same framing is observed on raven by the shim probe (device/google/raven/hardware/
++ * touch-run1-2026-11-05.txt: three reads accepted by sec_ts_reply_ok's rule, boot-complete event on the first poll).
++ */
++#ifndef SWEET_SEC_TS_H
++#define SWEET_SEC_TS_H
++
++#include <stdint.h>
++
++#define SEC_TS_SYNC              0xAAu  /* SEC_TS_SPI_SYNC_CODE, sec_ts.h:91 */
++#define SEC_TS_HDR               5u     /* SEC_TS_SPI_HEADER_SIZE, sec_ts.h:92 */
++#define SEC_TS_RD_HDR            7u     /* SEC_TS_SPI_READ_HEADER_SIZE, sec_ts.h:93 */
++#define SEC_TS_REQ_LEN           8u     /* read request: header 5 + reg 1 + checksum 1, padded to 4 (sec_ts.c:310-324) */
++#define SEC_TS_MAX_WRITE_DATA    8u     /* this driver writes at most 2 data bytes (SET_TOUCHFUNCTION) */
++
++/* registers (sec_ts.h) */
++#define SEC_TS_CMD_SENSE_ON          0x10u  /* sec_ts.h:209 */
++#define SEC_TS_READ_DEVICE_ID        0x22u  /* sec_ts.h:220, 5 bytes (sec_ts.c:4322) */
++#define SEC_TS_READ_PANEL_INFO       0x23u  /* sec_ts.h:221, 11 bytes (sec_ts.c:4112) */
++#define SEC_TS_CMD_SET_TOUCHFUNCTION 0x30u  /* sec_ts.h:225, 2 bytes (sec_ts.c:4160, 4379) */
++#define SEC_TS_READ_ID               0x52u  /* sec_ts.h:249, 3 bytes (sec_ts.c:4100) */
++#define SEC_TS_READ_BOOT_STATUS      0x55u  /* sec_ts.h:250, 1 byte */
++#define SEC_TS_READ_ONE_EVENT        0x60u  /* sec_ts.h:252 */
++#define SEC_TS_READ_ALL_EVENT        0x61u  /* sec_ts.h:253 */
++#define SEC_TS_CMD_CLEAR_EVENT_STACK 0x62u  /* sec_ts.h:254 */
++
++/* SEC_TS_DEFAULT_ENABLE_BIT_SETFUNC = TOUCH | PALM | WET (sec_ts.h:391-403), OR-ed into the value read back (sec_ts.c:4378) */
++#define SEC_TS_SETFUNC_DEFAULT       0x0061u
++
++/* sec_ts_spi_delay (sec_ts.c:59-97): wait between the request and the reply transfer */
++#define SEC_TS_DELAY_US              100u
++#define SEC_TS_DELAY_ALL_EVENT_US    550u
++
++#define SEC_TS_STATUS_BOOT_MODE  0x10u  /* sec_ts.h:338 */
++#define SEC_TS_STATUS_APP_MODE   0x20u  /* sec_ts.h:339 */
++
++#define SEC_TS_EVENT_SIZE        8u     /* SEC_TS_EVENT_BUFF_SIZE, sec_ts.h:350 */
++#define SEC_TS_MAX_EVENTS        32u    /* MAX_EVENT_COUNT, sec_ts.c:3068 */
++#define SEC_TS_TOUCH_ID_MAX      10u    /* MAX_SUPPORT_TOUCH_COUNT, sec_ts.h:135 */
++
++/* event id, byte 0 bits 1:0 (sec_ts.h:344-347, read at sec_ts.c:3173) */
++#define SEC_TS_EID_COORDINATE    0u
++#define SEC_TS_EID_STATUS        1u
++/* coordinate action, tchsta = byte 0 bits 7:6 (sec_ts.h:355-358) */
++#define SEC_TS_ACTION_PRESS      1u
++#define SEC_TS_ACTION_MOVE       2u
++#define SEC_TS_ACTION_RELEASE    3u
++/* touch type (sec_ts.h:360-369) */
++#define SEC_TS_TT_NORMAL         0u
++#define SEC_TS_TT_GLOVE          3u
++#define SEC_TS_TT_PALM           5u
++#define SEC_TS_TT_WET            6u
++#define SEC_TS_TT_GRIP           10u
++/* status event type = byte 0 bits 5:2, status id = byte 1 (struct sec_ts_event_status, sec_ts.h:812-827) */
++#define SEC_TS_STYPE_ERR         1u     /* TYPE_STATUS_EVENT_ERR, sec_ts.h:120 */
++#define SEC_TS_STYPE_INFO        2u     /* TYPE_STATUS_EVENT_INFO, sec_ts.h:121 */
++#define SEC_TS_STYPE_VENDOR_INFO 7u     /* TYPE_STATUS_EVENT_VENDOR_INFO, sec_ts.h:124 */
++#define SEC_TS_ACK_BOOT_COMPLETE 0x00u  /* sec_ts.h:372 */
++#define SEC_TS_ERR_QUEUE_FULL    0x01u  /* SEC_TS_ERR_EVENT_QUEUE_FULL, sec_ts.h:388 */
++#define SEC_TS_BOOT_WATCHDOG     0x20u  /* status_data_1 of a boot-complete event: "watchdog reset !?", sec_ts.c:3192-3204 */
++
++/* sec_ts_probe reset timing (sec_ts.c:4724-4733) and sec_ts_wait_for_ready (sec_ts.c:1089-1113, SEC_TS_WAIT_RETRY_CNT 100,
++ * sec_ts.h:608): READ_ONE_EVENT up to 100 times, 20 ms apart. The 80 ms after reset high is the shim's observed recipe
++ * (mdelay(10) + sec_ts_delay(70)). */
++#define SEC_TS_RESET_LOW_MS      10u
++#define SEC_TS_BOOT_WAIT_MS      80u
++#define SEC_TS_READY_TRIES       100u
++#define SEC_TS_READY_POLL_MS     20u
++
++/* Bytes clocked in for a read of len data bytes: header 7 + data + checksum 1, rounded up to 4 (sec_ts.c:326-328). */
++static inline unsigned
++sec_ts_reply_len(unsigned len)
++{
++	return (SEC_TS_RD_HDR + len + 1u + 3u) & ~3u;
++}
++
++/* Read request (sec_ts.c:310-324): AA 00 01 len_hi len_lo reg checksum 00, checksum = byte sum of the first six. */
++static inline void
++sec_ts_read_req(uint8_t *f, unsigned reg, unsigned len)
++{
++	unsigned i, sum = 0;
++
++	f[0] = SEC_TS_SYNC;
++	f[1] = 0x00;
++	f[2] = 0x01;
++	f[3] = (uint8_t)(len >> 8);
++	f[4] = (uint8_t)len;
++	f[5] = (uint8_t)reg;
++	for (i = 0; i < 6u; i++) {
++		sum += f[i];
++	}
++	f[6] = (uint8_t)sum;
++	f[7] = 0x00;
++}
++
++/*
++ * Write frame (sec_ts_write, sec_ts.c:162-183): AA, (len+1) big-endian, 00 00, reg, data, checksum over all bytes before it,
++ * zero padding to a multiple of 4. f must hold 16 bytes. Returns the frame length, or 0 if len is too long (nothing built).
++ */
++static inline unsigned
++sec_ts_write_frame(uint8_t *f, unsigned reg, const uint8_t *data, unsigned len)
++{
++	unsigned i, n, sum = 0;
++
++	if (len > SEC_TS_MAX_WRITE_DATA) {
++		return 0;
++	}
++	f[0] = SEC_TS_SYNC;
++	f[1] = (uint8_t)((len + 1u) >> 8);
++	f[2] = (uint8_t)(len + 1u);
++	f[3] = 0x00;
++	f[4] = 0x00;
++	f[5] = (uint8_t)reg;
++	for (i = 0; i < len; i++) {
++		f[SEC_TS_HDR + 1u + i] = data[i];
++	}
++	n = SEC_TS_HDR + 1u + len;
++	for (i = 0; i < n; i++) {
++		sum += f[i];
++	}
++	f[n++] = (uint8_t)sum;
++	while (n & 3u) {
++		f[n++] = 0x00;
++	}
++	return n;
++}
++
++/* sec_ts_read_internal's acceptance test (sec_ts.c:411-435): sync byte, register echoed at byte 5, byte sum of header and
++ * data equal to the checksum byte after them. Byte 6 (command status) is not checked there either (:431). Data at byte 7. */
++static inline int
++sec_ts_reply_ok(const uint8_t *r, unsigned reg, unsigned len)
++{
++	unsigned i, sum = 0;
++
++	for (i = 0; i < SEC_TS_RD_HDR + len; i++) {
++		sum += r[i];
++	}
++	return r[0] == SEC_TS_SYNC && r[5] == (uint8_t)reg && (uint8_t)sum == r[SEC_TS_RD_HDR + len];
++}
++
++/* sec_ts_wait_for_ready_with_count (sec_ts.c:1096-1110): INFO or VENDOR_INFO status type and byte 1 == the ack */
++static inline int
++sec_ts_boot_complete(const uint8_t *e)
++{
++	unsigned type = (e[0] >> 2) & 0xfu;
++
++	return (type == SEC_TS_STYPE_INFO || type == SEC_TS_STYPE_VENDOR_INFO) && e[1] == SEC_TS_ACK_BOOT_COMPLETE;
++}
++
++/* The firmware rebooted on its own (watchdog): a boot-complete INFO event with status_data_1 0x20 while running
++ * (sec_ts_read_event, sec_ts.c:3192-3204: Linux releases all fingers and sends SENSE_ON again). */
++static inline int
++sec_ts_watchdog_reset(const uint8_t *e)
++{
++	return (e[0] & 3u) == SEC_TS_EID_STATUS && ((e[0] >> 2) & 0xfu) == SEC_TS_STYPE_INFO &&
++	       e[1] == SEC_TS_ACK_BOOT_COMPLETE && e[2] == SEC_TS_BOOT_WATCHDOG;
++}
++
++/* The controller's event queue overflowed and dropped events, releases among them: Linux releases every finger
++ * (sec_ts_read_event, sec_ts.c:3232-3240: ERR status type, status id QUEUE_FULL). */
++static inline int
++sec_ts_queue_full(const uint8_t *e)
++{
++	return (e[0] & 3u) == SEC_TS_EID_STATUS && ((e[0] >> 2) & 0xfu) == SEC_TS_STYPE_ERR &&
++	       e[1] == SEC_TS_ERR_QUEUE_FULL;
++}
++
++/* Events queued behind this one: byte 7 bits 5:0 (sec_ts.c:3140). Returns SEC_TS_MAX_EVENTS (an overflow: Linux then sends
++ * CLEAR_EVENT_STACK, sec_ts.c:3142-3157) when it is above MAX_EVENT_COUNT - 1. */
++static inline unsigned
++sec_ts_events_left(const uint8_t *e)
++{
++	unsigned n = e[7] & 0x3fu;
++
++	return n > SEC_TS_MAX_EVENTS - 1u ? SEC_TS_MAX_EVENTS : n;
++}
++
++enum sec_ts_kind { SEC_TS_NONE, SEC_TS_DOWN, SEC_TS_UP, SEC_TS_CANCEL, SEC_TS_STATUS, SEC_TS_IGNORED };
++
++struct sec_ts_ev {
++	enum sec_ts_kind kind;
++	unsigned id;     /* 0-based (tid - 1) */
++	int x, y;
++	unsigned ttype;
++};
++
++/*
++ * Decode one 8-byte event. struct sec_ts_event_coordinate (sec_ts.h:832-845, GCC little-endian bitfields: first field =
++ * low bits): b0 = tchsta<<6 | tid<<2 | eid, x = b1<<4 | b3>>4, y = b2<<4 | (b3 & 0xf), ttype = (b6>>6)<<2 | b7>>6.
++ * Decoded as sec_ts_handle_coord_event (sec_ts.c:2017-2033). An all-zero byte 0 is the empty buffer (sec_ts.c:3134).
++ */
++static inline struct sec_ts_ev
++sec_ts_parse_event(const uint8_t *e)
++{
++	struct sec_ts_ev r = { SEC_TS_IGNORED, 0, 0, 0, 0 };
++	unsigned tid, action;
++
++	if (e[0] == 0) {
++		r.kind = SEC_TS_NONE;
++		return r;
++	}
++	if ((e[0] & 3u) == SEC_TS_EID_STATUS) {
++		r.kind = SEC_TS_STATUS;
++		return r;
++	}
++	if ((e[0] & 3u) != SEC_TS_EID_COORDINATE) {
++		return r;                 /* gesture / empty event ids (sec_ts.h:346-347): not used here */
++	}
++	tid = (e[0] >> 2) & 0xfu;
++	action = (e[0] >> 6) & 3u;
++	if (tid == 0 || tid - 1u >= SEC_TS_TOUCH_ID_MAX) {
++		return r;                 /* sec_ts.c:2017-2019 drops ids outside the table */
++	}
++	r.id = tid - 1u;
++	r.x = ((int)e[1] << 4) | (e[3] >> 4);
++	r.y = ((int)e[2] << 4) | (e[3] & 0x0fu);
++	r.ttype = ((unsigned)(e[6] >> 6) << 2) | (unsigned)(e[7] >> 6);
++	/* sec_ts_handle_coord_event reports only these five types, for every action (sec_ts.c:2059-2068); any other type
++	 * (hover, stylus, unknown) is ignored, its release included (review 1 F2). */
++	if (r.ttype != SEC_TS_TT_NORMAL && r.ttype != SEC_TS_TT_GLOVE && r.ttype != SEC_TS_TT_WET &&
++	    r.ttype != SEC_TS_TT_PALM && r.ttype != SEC_TS_TT_GRIP) {
++		return r;
++	}
++	if (action == SEC_TS_ACTION_RELEASE) {
++		r.kind = SEC_TS_UP;       /* every reported type releases (sec_ts.c:2070-2095) */
++	} else if (action == SEC_TS_ACTION_PRESS || action == SEC_TS_ACTION_MOVE) {
++		/* PALM / GRIP are reported as MT_TOOL_PALM (sec_ts.c:2148-2153): a cancel here */
++		r.kind = (r.ttype == SEC_TS_TT_PALM || r.ttype == SEC_TS_TT_GRIP) ? SEC_TS_CANCEL : SEC_TS_DOWN;
++	}
++	return r;
++}
++
++/* Panel size from READ_PANEL_INFO (sec_ts.c:4112, 4125-4130): x = b0<<8 | b1, y = b2<<8 | b3 (pixels, max = size - 1). */
++static inline void
++sec_ts_panel_size(const uint8_t *d, unsigned *x, unsigned *y)
++{
++	*x = ((unsigned)d[0] << 8) | d[1];
++	*y = ((unsigned)d[2] << 8) | d[3];
++}
++
++#endif /* SWEET_SEC_TS_H */
+--- a/bsd/dev/sweet_touch_gs101.c
++++ b/bsd/dev/sweet_touch_gs101.c
+@@ -3,7 +3,17 @@
+  * sweet_hid_touch() (iokit/Kernel/arm/hid/SweetHID.cpp). Design and unknowns: docs/research/15-touch-gs101.md.
+  *
+  * Silent no-op unless the ADT has /sweet-touch (tools/mkadt.py adds it only for boards whose board.json has a
+- * touch_chip_id), so the Redmi Note 10 Pro tree is unchanged. Every address, pin and limit comes from that node.
++ * touch_chip_id or touch_protocol "sec_ts"), so the Redmi Note 10 Pro tree is unchanged. Every address, pin and limit
++ * comes from that node.
++ *
++ * Pixel 6 Pro ("raven", patch 0146): /sweet-touch "protocol" = "sec_ts" selects the Samsung S6SY79x protocol
++ * (sweet_sec_ts.h) on the same SPI11 bus: SPI mode 3 (raven DT spi-cpol, spi-cpha), no chip-id property, reset pulse and
++ * boot-complete event before the identify (always, as the shim probe that read the chip on raven did), identify =
++ * DEVICE_ID / ID / BOOT_STATUS (must be app mode) / PANEL_INFO, then SET_TOUCHFUNCTION |= 0x61 and SENSE_ON
++ * (sec_ts_fw_init), then READ_ONE_EVENT / READ_ALL_EVENT polling. No "protocol" property = FTM5, unchanged.
++ * Raven needs the same boot-args as bluejay's observed recipe: sweettouchmux=1 sweettouchclk=3 sweettouchcs=1 and the
++ * oscillator poke, with the shim's --rails. Optional /sweet-touch "spi-fb-delay" (raven: 0, from its DT) replaces the
++ * FB_CLK value 1 the SPI setup writes.
+  *
+  * Boot-args:
+  *   sweettouch=0|1|2     0 off; 1 identify only (phase 1); 2 identify, then enable and poll (phase 2, default)
+@@ -84,6 +94,9 @@
+ #include <stdint.h>
+ #include "sweet_ftm5.h"
+ #include "sweet_touch_poke.h"
++#include "sweet_sec_ts.h"
++
++_Static_assert(SEC_TS_TOUCH_ID_MAX <= FTM5_TOUCH_ID_MAX, "the finger tables are sized for FTM5");
+ 
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+ extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
+@@ -119,6 +132,11 @@ void sweet_touch_gs101_init(void);
+ #define CH_RXCH_ON       (1u << 1)
+ #define CH_TXCH_ON       (1u << 0)
+ #define CH_HS_EN         (1u << 6)
++/* clock polarity / phase (spi-cpol + spi-cpha = SPI mode 3, sec_ts): spi-s3c64xx.c S3C64XX_SPI_CH_SLAVE :54, CPOL_L :55,
++ * CPHA_B :56, set by s3c64xx_spi_config :779-:790 (kernel/gs 6e771b230c52; observed on raven: shim touch-run1 ch=0xc) */
++#define CH_SLAVE         (1u << 4)
++#define CH_CPOL_L        (1u << 3)
++#define CH_CPHA_B        (1u << 2)
+ #define PKT_CNT_EN       (1u << 16)
+ #define ST_RX_LVL(v)     (((v) >> 15) & 0x1ffu)  /* S3C64XX_SPI_ST_RX_FIFO_RDY_V2 = GENMASK(23, 15) */
+ #define ST_TX_LVL(v)     (((v) >> 6) & 0x1ffu)   /* S3C64XX_SPI_ST_TX_FIFO_RDY_V2 = GENMASK(14, 6) */
+@@ -163,6 +181,11 @@ static struct {
+ 		vm_offset_t va;
+ 	} top;
+ 	int clk_mode, var, cs_abl;
++	bool sec;            /* /sweet-touch protocol = "sec_ts" */
++	bool sec_reinit;     /* sec_ts watchdog-reset event seen: send SET_TOUCHFUNCTION + SENSE_ON again */
++	uint32_t ch_mode;    /* CH_CFG clock mode bits: 0 (FTM5, mode 0) or CPOL_L | CPHA_B (sec_ts, mode 3) */
++	bool fb_delay_set;   /* /sweet-touch has spi-fb-delay: FB_CLK[1:0] := fb_delay after the SPI setup */
++	uint32_t fb_delay;
+ 	bool reset_done;   /* tg_reset_and_ready already ran (sweettouchcs=1 does it before the identify) */
+ 	char poke[POKE_MAX_LEN + 16];   /* sweettouchpoke boot-arg (empty = none) */
+ 	uint32_t last_st, last_ch;   /* STATUS / CH_CFG at the last burst timeout */
+@@ -489,7 +512,7 @@ tg_parse(DTEntry node)
+ 	    !tg_dt_u32(node, "usi-mode-spi", &tg.usi_mode_spi, 1) ||
+ 	    !tg_dt_u32(node, "usi-mode-mask", &tg.usi_mode_mask, 1) ||
+ 	    !tg_dt_u32(node, "spi-pin-func", &tg.spi_func, 1) || !tg_dt_u32(node, "max-hz", &tg.max_hz, 1) ||
+-	    !tg_dt_u32(node, "chip-id", tg.chip_id, 2) || !tg_dt_u32(node, "max-coords", u, 2) ||
++	    (!tg.sec && !tg_dt_u32(node, "chip-id", tg.chip_id, 2)) || !tg_dt_u32(node, "max-coords", u, 2) ||
+ 	    !tg_dt_pin(node, "pin-clk", &tg.clk) || !tg_dt_pin(node, "pin-mosi", &tg.mosi) ||
+ 	    !tg_dt_pin(node, "pin-miso", &tg.miso) || !tg_dt_pin(node, "pin-cs", &tg.cs) ||
+ 	    !tg_dt_pin(node, "pin-irq", &tg.irq) || !tg_dt_pin(node, "pin-reset", &tg.reset) ||
+@@ -806,7 +829,7 @@ tg_spi_engine_init(void)
+ 	tg_wr(tg.spi, SPI_PENDING_CLR, PND_ERR_CLR);
+ 	tg_wr(tg.spi, SPI_PENDING_CLR, 0);
+ 	tg_wr(tg.spi, SPI_SWAP_CFG, 0);
+-	tg_wr(tg.spi, SPI_CH_CFG, 0);              /* CPOL = 0, CPHA = 0 (no spi-cpol/cpha in the DT), master */
++	tg_wr(tg.spi, SPI_CH_CFG, tg.ch_mode);     /* master; FTM5: CPOL = CPHA = 0 (no spi-cpol/cpha in its DT); sec_ts: mode 3 */
+ 	tg_wr(tg.spi, SPI_FB_CLK, 1);              /* samsung,spi-feedback-delay = <1>, gs101-fts-touch.dtsi:35 */
+ 	tg_spi_flush();
+ }
+@@ -846,6 +869,12 @@ tg_spi_setup(void)
+ 	} else {
+ 		tg_spi_engine_init();
+ 	}
++	if (tg.sec) {   /* the ABL setup above does not write CH_CFG: set mode 3 here too (shim spi_setup, observed ch=0xc) */
++		tg_wr(tg.spi, SPI_CH_CFG, (tg_rd(tg.spi, SPI_CH_CFG) & ~CH_SLAVE) | tg.ch_mode);
++	}
++	if (tg.fb_delay_set) {   /* /sweet-touch spi-fb-delay (raven: 0, its DT; without the property both paths above write 1) */
++		tg_wr(tg.spi, SPI_FB_CLK, (tg_rd(tg.spi, SPI_FB_CLK) & ~3u) | (tg.fb_delay & 3u));
++	}
+ 	printf("SWEET TOUCH: SPI regs after init:  ch=%#x clk=%#x mode=%#x status=%#x fb=%#x (max %u Hz; the\n"
+ 	    "SWEET TOUCH: actual SCK = CMU ipclk / 4 and is unverified)\n",
+ 	    tg_rd(tg.spi, SPI_CH_CFG), tg_rd(tg.spi, SPI_CLK_CFG), tg_rd(tg.spi, SPI_MODE_CFG),
+@@ -1077,13 +1106,250 @@ tg_enable_scan(void)
+ 	return tg_xfer(cmd1, sizeof(cmd1), NULL, 0) == 0 && tg_xfer(cmd, sizeof(cmd), NULL, 0) == 0;
+ }
+ 
++/* ---- sec_ts (raven, /sweet-touch protocol = "sec_ts"; constants and cites in sweet_sec_ts.h) ---- */
++
++/* One chip-select assertion around len bytes, sent/received as FIFO-sized bursts with the chip select held low between them
++ * (as tg_xfer holds it across the FTM5 command and reply). Same chip-select timing as tg_xfer and the shim probe's
++ * cs_begin/cs_end, which read the S6SY79x on raven (touch-run1). tx NULL clocks out zeros, rx NULL drops the reply.
++ * Chunking a reply above 64 bytes is what the stock kernel does on raven (review 1 F1): its SPI11 has no dma-mode, so
++ * s3c64xx runs in CPU mode and splits a transfer into fifo_lvl = 64-byte chunks with flush_fifo() (channels off, SW_RST,
++ * drain) between them, under one manual chip select (spi-s3c64xx.c:1002-1011, :1105-1124, :1157-1158, kernel/gs
++ * 6e771b230c52; DT observed in device/google/raven/hardware/spi11-dt-2026-11-06.txt). */
++static int
++tg_cs_stream(const uint8_t *tx, uint8_t *rx, unsigned len)
++{
++	unsigned off;
++	int err = 0;
++
++	tg_pin_put(&tg.cs, 0);
++	if (tg.cs_abl) {
++		tg_wr(tg.spi, SPI_CS_REG, tg_rd(tg.spi, SPI_CS_REG) & ~1u);
++	}
++	delay(1);
++	for (off = 0; !err && off < len; off += SPI_FIFO_BYTES) {
++		unsigned n = len - off > SPI_FIFO_BYTES ? SPI_FIFO_BYTES : len - off;
++		err = tg_spi_burst(tx ? tx + off : NULL, rx ? rx + off : NULL, n);
++	}
++	delay(FTM5_SPI_DELAY_CS_US);
++	tg_pin_put(&tg.cs, 1);
++	if (tg.cs_abl) {
++		tg_wr(tg.spi, SPI_CS_REG, tg_rd(tg.spi, SPI_CS_REG) | 1u);
++	}
++	delay(2);
++	return err;
++}
++
++/* sec_ts_read_internal (SPI build): the request in one chip select, the register's wait, the reply in a second one, checked
++ * as sec_ts does; up to SEC_TS_IO_RETRY_CNT (3, sec_ts.h:607) tries 1 ms apart. 0 = good frame (len data bytes in out),
++ * -1 = SPI burst timeout, -2 = bad frame after all tries, -3 = len out of range (nothing sent). */
++static int
++tg_sec_read(unsigned reg, uint8_t *out, unsigned len)
++{
++	uint8_t req[SEC_TS_REQ_LEN], rx[SEC_TS_MAX_EVENTS * SEC_TS_EVENT_SIZE + 8u];
++	unsigned n = sec_ts_reply_len(len), try;
++
++	if (len == 0 || n > sizeof(rx)) {
++		return -3;
++	}
++	sec_ts_read_req(req, reg, len);
++	for (try = 0; try < 3u; try++) {
++		if (try) {
++			delay(1000);
++		}
++		if (tg_cs_stream(req, NULL, sizeof(req))) {
++			return -1;
++		}
++		delay(reg == SEC_TS_READ_ALL_EVENT ? SEC_TS_DELAY_ALL_EVENT_US : SEC_TS_DELAY_US);
++		if (tg_cs_stream(NULL, rx, n)) {
++			return -1;
++		}
++		if (sec_ts_reply_ok(rx, reg, len)) {
++			memcpy(out, rx + SEC_TS_RD_HDR, len);
++			return 0;
++		}
++	}
++	return -2;
++}
++
++/* sec_ts_write (SPI build): the whole frame in one chip select. 0, or -1 on an SPI timeout / a frame too long. */
++static int
++tg_sec_write(unsigned reg, const uint8_t *data, unsigned len)
++{
++	uint8_t f[16];
++	unsigned n = sec_ts_write_frame(f, reg, data, len);
++
++	if (n == 0 || tg_cs_stream(f, NULL, n)) {
++		return -1;
++	}
++	return 0;
++}
++
++/* sec_ts_probe: reset low 10 ms, high, ~80 ms, then sec_ts_wait_for_ready(SEC_TS_ACK_BOOT_COMPLETE). Nothing reaches HID. */
++static bool
++tg_sec_reset_and_ready(unsigned *logged)
++{
++	tg_pin_put(&tg.reset, 0);
++	tg_pin_set_func(&tg.reset, PIN_FUNC_OUTPUT);
++	tg_sleep_ms(SEC_TS_RESET_LOW_MS);
++	tg_pin_put(&tg.reset, 1);
++	tg_sleep_ms(SEC_TS_BOOT_WAIT_MS);
++	for (unsigned i = 0; i < SEC_TS_READY_TRIES; i++) {
++		uint8_t e[SEC_TS_EVENT_SIZE];
++		int err = tg_sec_read(SEC_TS_READ_ONE_EVENT, e, sizeof(e));
++
++		if (err == -1) {
++			printf("SWEET TOUCH: sec_ts: SPI transfer timed out while waiting for boot-complete\n");
++			return false;
++		}
++		if (err == 0) {
++			if (e[0] != 0 && *logged < 200u) {
++				printf("SWEET TOUCH: boot ev %02x %02x %02x %02x %02x %02x %02x %02x (try %u)\n",
++				    e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], i);
++				(*logged)++;
++			}
++			if (sec_ts_boot_complete(e)) {
++				return true;
++			}
++		}
++		tg_sleep_ms(SEC_TS_READY_POLL_MS);
++	}
++	return false;
++}
++
++/* sec_ts_fw_init / sec_ts_read_information reads: device id, id, boot status (must be app mode), panel size. */
++static bool
++tg_sec_identify(void)
++{
++	uint8_t d[11];
++	unsigned px, py;
++	int err;
++
++	if ((err = tg_sec_read(SEC_TS_READ_DEVICE_ID, d, 5)) != 0) {
++		printf("SWEET TOUCH: sec_ts identify: DEVICE_ID read failed (%d: %s)\n", err,
++		    err == -1 ? "SPI timeout" : "no valid frame: rails off, in reset, wrong SPI mode or bus not ours?");
++		return false;
++	}
++	printf("SWEET TOUCH: sec_ts DEVICE_ID %02x %02x %02x %02x %02x\n", d[0], d[1], d[2], d[3], d[4]);
++	if (tg_sec_read(SEC_TS_READ_ID, d, 3) == 0) {
++		printf("SWEET TOUCH: sec_ts ID %02x %02x %02x\n", d[0], d[1], d[2]);
++	}
++	if (tg_sec_read(SEC_TS_READ_BOOT_STATUS, d, 1) != 0) {
++		printf("SWEET TOUCH: sec_ts identify: BOOT_STATUS read failed\n");
++		return false;
++	}
++	printf("SWEET TOUCH: sec_ts boot status %#x (%s)\n", d[0], d[0] == SEC_TS_STATUS_APP_MODE ? "app" :
++	    d[0] == SEC_TS_STATUS_BOOT_MODE ? "BOOTLOADER: firmware not running" : "unknown");
++	if (d[0] != SEC_TS_STATUS_APP_MODE) {
++		return false;
++	}
++	if (tg_sec_read(SEC_TS_READ_PANEL_INFO, d, sizeof(d)) == 0) {
++		sec_ts_panel_size(d, &px, &py);
++		printf("SWEET TOUCH: sec_ts panel %ux%u, tx %u rx %u (ADT max-coords %u,%u)\n", px, py, d[8], d[9],
++		    tg.max_x, tg.max_y);
++	}
++	return true;
++}
++
++/* sec_ts_fw_init (sec_ts.c:4378-4392): SET_TOUCHFUNCTION := (value read back, a little-endian u16) | TOUCH|PALM|WET, then
++ * SENSE_ON. Also the recovery after a firmware watchdog reset (sec_ts.c:3200-3210: Linux sends SENSE_ON, then sec_ts_reinit
++ * rewrites the touch function; here the order is that of the first start). */
++static bool
++tg_sec_enable(void)
++{
++	uint8_t f[2];
++	unsigned fn;
++
++	if (tg_sec_read(SEC_TS_CMD_SET_TOUCHFUNCTION, f, 2) != 0) {
++		printf("SWEET TOUCH: sec_ts: touch function read failed\n");
++		return false;
++	}
++	fn = ((unsigned)f[0] | (unsigned)f[1] << 8) | SEC_TS_SETFUNC_DEFAULT;
++	printf("SWEET TOUCH: sec_ts touch functions %02x%02x -> %04x, sense on\n", f[1], f[0], fn);
++	f[0] = (uint8_t)fn;
++	f[1] = (uint8_t)(fn >> 8);
++	return tg_sec_write(SEC_TS_CMD_SET_TOUCHFUNCTION, f, 2) == 0 && tg_sec_write(SEC_TS_CMD_SENSE_ON, NULL, 0) == 0;
++}
++
++static void
++tg_sec_handle(const uint8_t *e, unsigned *logged)
++{
++	struct sec_ts_ev ev = sec_ts_parse_event(e);
++
++	switch (ev.kind) {
++	case SEC_TS_DOWN:
++		tg.last_x[ev.id] = ftm5_scale(ev.x, (int)tg.max_x, (int)tg.width);
++		tg.last_y[ev.id] = ftm5_scale(ev.y, (int)tg.max_y, (int)tg.height);
++		tg.down[ev.id] = true;
++		sweet_hid_touch((int)ev.id, 1, tg.last_x[ev.id], tg.last_y[ev.id]);
++		break;
++	case SEC_TS_UP:
++	case SEC_TS_CANCEL:
++		if (tg.down[ev.id]) {
++			tg.down[ev.id] = false;
++			sweet_hid_touch((int)ev.id, 0, tg.last_x[ev.id], tg.last_y[ev.id]);
++		}
++		break;
++	case SEC_TS_STATUS:
++		if (sec_ts_watchdog_reset(e)) {
++			printf("SWEET TOUCH: sec_ts firmware watchdog reset: fingers released, sense on again\n");
++			tg_release_all();
++			tg.sec_reinit = true;
++		} else if (sec_ts_queue_full(e)) {
++			/* releases may have been dropped with the overflow: no finger may stay down in iOS (review 1 F3) */
++			printf("SWEET TOUCH: sec_ts controller event queue full: fingers released\n");
++			tg_release_all();
++		}
++		break;
++	case SEC_TS_NONE:
++		return;
++	default:
++		break;
++	}
++	if (ev.kind != SEC_TS_DOWN || *logged < 40u) {
++		if (*logged < 200u) {
++			printf("SWEET TOUCH: ev %02x %02x %02x %02x %02x %02x %02x %02x -> kind %d id %u type %u raw %d,%d\n",
++			    e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], (int)ev.kind, ev.id, ev.ttype, ev.x, ev.y);
++			(*logged)++;
++		}
++	}
++}
++
++/* sec_ts_read_event (sec_ts.c:3069-3180): READ_ONE_EVENT; empty if byte 0 is 0; byte 7 = events still queued, read with one
++ * READ_ALL_EVENT; more than 31 = overflow -> CLEAR_EVENT_STACK and nothing handled. -1 = bus error, else events handled. */
++static int
++tg_sec_drain(unsigned *logged)
++{
++	uint8_t buf[SEC_TS_MAX_EVENTS * SEC_TS_EVENT_SIZE];
++	unsigned left;
++
++	if (tg_sec_read(SEC_TS_READ_ONE_EVENT, buf, SEC_TS_EVENT_SIZE) != 0) {
++		return -1;
++	}
++	if (buf[0] == 0) {
++		return 0;
++	}
++	left = sec_ts_events_left(buf);
++	if (left >= SEC_TS_MAX_EVENTS) {
++		printf("SWEET TOUCH: sec_ts event buffer overflow, clearing\n");
++		(void)tg_sec_write(SEC_TS_CMD_CLEAR_EVENT_STACK, NULL, 0);
++		return 0;
++	}
++	if (left && tg_sec_read(SEC_TS_READ_ALL_EVENT, buf + SEC_TS_EVENT_SIZE, left * SEC_TS_EVENT_SIZE) != 0) {
++		return -1;
++	}
++	for (unsigned i = 0; i <= left; i++) {
++		tg_sec_handle(buf + i * SEC_TS_EVENT_SIZE, logged);
++	}
++	return (int)left + 1;
++}
++
+ static void
+ tg_run(void)
+ {
+ 	unsigned logged = 0, errors = 0;
+ 	bool ok;
+ 
+-	printf("SWEET TOUCH: gs101 FTM5 driver, mode %d, starting in %u s\n", tg.mode, tg.delay_s);
++	printf("SWEET TOUCH: gs101 %s driver, mode %d, starting in %u s\n", tg.sec ? "sec_ts" : "FTM5", tg.mode, tg.delay_s);
+ 	tg_sleep_ms(tg.delay_s * 1000u);
+ 	printf("SWEET TOUCH: mapping SPI %#llx, USI mode %#llx and the pad banks\n",
+ 	    (unsigned long long)tg.spi_pa, (unsigned long long)tg.usi_mode_pa);
+@@ -1104,18 +1370,20 @@ tg_run(void)
+ 		return;
+ 	}
+ 	tg_spi_diag("after setup");
+-	if (tg.cs_abl) {   /* run touch1: the chip answered after PUD := 0 and the reset pulse, so that comes first */
++	/* run touch1: the chip answered after PUD := 0 and the reset pulse, so that comes first. sec_ts always does this: the
++	 * firmware only answers after the reset (shim touch-run1, raven). */
++	if (tg.cs_abl || tg.sec) {
+ 		tg_pin_set_pud(&tg.clk, 0);
+ 		tg_pin_set_pud(&tg.mosi, 0);
+ 		tg_pin_set_pud(&tg.miso, 0);
+ 		tg_pin_set_pud(&tg.cs, 0);
+ 		tg_pin_set_pud(&tg.reset, 0);
+-		printf("SWEET TOUCH: sweettouchcs=1: pads PUD := 0, reset pulse before the identify\n");
+-		tg.reset_done = tg_reset_and_ready(&logged);
++		printf("SWEET TOUCH: %s: pads PUD := 0, reset pulse before the identify\n", tg.cs_abl ? "sweettouchcs=1" : "sec_ts");
++		tg.reset_done = tg.sec ? tg_sec_reset_and_ready(&logged) : tg_reset_and_ready(&logged);
+ 		printf("SWEET TOUCH: reset before identify: %s\n", tg.reset_done ? "controller-ready event seen" : "no ready event");
+ 	}
+-	ok = tg_identify();
+-	for (unsigned n = 0; !ok && tg.var && n < 5; n++) {
++	ok = tg.sec ? tg_sec_identify() : tg_identify();
++	for (unsigned n = 0; !ok && !tg.sec && tg.var && n < 5; n++) {   /* the variants send the FTM5 chip-id read */
+ 		if (tg_variant(n)) {
+ 			printf("SWEET TOUCH: VARIANT %c completes, identifying again\n", (char)('A' + n));
+ 			tg_spi_diag("after variant");
+@@ -1132,16 +1400,16 @@ tg_run(void)
+ 		return;
+ 	}
+ 	printf("SWEET TOUCH: phase 2: reset pulse, scan enable, poll\n");
+-	if (!tg.reset_done && !tg_reset_and_ready(&logged)) {
++	if (!tg.reset_done && !(tg.sec ? tg_sec_reset_and_ready(&logged) : tg_reset_and_ready(&logged))) {
+ 		printf("SWEET TOUCH: no controller-ready event after the reset pulse (GUESS: continuing)\n");
+ 	}
+-	if (!tg_enable_scan()) {
++	if (!(tg.sec ? tg_sec_enable() : tg_enable_scan())) {
+ 		printf("SWEET TOUCH: scan-mode write failed, stopping\n");
+ 		return;
+ 	}
+ 	printf("SWEET TOUCH: scanning, %dx%d raw -> %ux%u\n", (int)tg.max_x + 1, (int)tg.max_y + 1, tg.width, tg.height);
+ 	for (;;) {
+-		int n = tg_drain(&logged);
++		int n = tg.sec ? tg_sec_drain(&logged) : tg_drain(&logged);
+ 		if (n < 0) {
+ 			if (errors++ % 100u == 0) {
+ 				printf("SWEET TOUCH: FIFO read failed (%u)\n", errors);
+@@ -1152,6 +1420,12 @@ tg_run(void)
+ 		} else {
+ 			errors = 0;
+ 		}
++		if (tg.sec_reinit) {
++			tg.sec_reinit = false;
++			if (!tg_sec_enable()) {
++				printf("SWEET TOUCH: sec_ts: sense on after the watchdog reset failed\n");
++			}
++		}
+ 		tg_sleep_ms(n > 0 ? 1 : 8);
+ 	}
+ }
+@@ -1202,6 +1476,35 @@ sweet_touch_gs101_init(void)
+ 	if (delay_s < 0 || delay_s > 3600) {
+ 		delay_s = 45;
+ 	}
++	{
++		/* optional protocol string (patch 0146): absent = FTM5 (bluejay, unchanged); "sec_ts" = raven's S6SY79x */
++		char const *proto = NULL;
++		unsigned int psize = 0;
++		if (SecureDTGetProperty(node, "protocol", (void const **)&proto, &psize) == kSuccess && proto != NULL) {
++			if (psize >= sizeof("sec_ts") && strncmp(proto, "sec_ts", sizeof("sec_ts")) == 0) {
++				tg.sec = true;
++				tg.ch_mode = CH_CPOL_L | CH_CPHA_B;
++			} else {
++				printf("SWEET TOUCH: /sweet-touch has an unknown \"protocol\", driver not started\n");
++				return;
++			}
++		}
++	}
++	{
++		/* optional spi-fb-delay (patch 0146): samsung,spi-feedback-delay of the board's DT, written as s3c64xx does per message
++		 * (spi-s3c64xx.c:976, kernel/gs 6e771b230c52). Absent (bluejay) = the setup's FB_CLK 1, unchanged. */
++		uint32_t const *v = NULL;
++		unsigned int vsize = 0;
++		if (SecureDTGetProperty(node, "spi-fb-delay", (void const **)&v, &vsize) == kSuccess) {
++			/* present means it must be usable: a truncated value must not silently fall back to 1 (review 2 F1) */
++			if (v == NULL || vsize < 4u || *v > 3u) {
++				printf("SWEET TOUCH: /sweet-touch spi-fb-delay is malformed (size %u) or not 0..3, driver not started\n", vsize);
++				return;
++			}
++			tg.fb_delay_set = true;
++			tg.fb_delay = *v;
++		}
++	}
+ 	if (!tg_parse(node)) {
+ 		printf("SWEET TOUCH: /sweet-touch is incomplete, driver not started\n");
+ 		return;

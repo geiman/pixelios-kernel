@@ -275,23 +275,39 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', no_ufs=False, wla
                        for v in (k, base + off + config['gpio_alive_dat_off'], pin)])),
         ('active-low', u32(config['key_active_low'])),
     ]) if 'key_pins' in config and not qemu else None
-    # bsd/dev/sweet_touch_gs101.c (patch 0088): the FTM5 touchscreen. Only boards whose board.json names a touch IC
-    # (touch_chip_id) get the node; sweet keeps an unchanged tree. Pins are (bank register base, pin) u64 pairs; the
+    # bsd/dev/sweet_touch_gs101.c (patches 0088, 0146): the gs101 touchscreen. Only boards whose board.json names a touch IC
+    # (touch_chip_id) or touch_protocol sec_ts get the node; sweet keeps an unchanged tree. Pins are (bank register base, pin) u64 pairs; the
     # bank bases and the USI/SPI engine come from soc.json (sources cited there).
+    # touch_protocol (tools/boards.py): absent/ftm5 = bluejay's FTM5 (chip-id, no protocol property: the node is unchanged);
+    # sec_ts = raven's S6SY79x: protocol "sec_ts" and no chip-id (xnu patch 0146 selects its sec_ts path on that string).
+    touch_proto = config.get('touch_protocol', 'ftm5')
+    # optional touch_spi_fb_delay (raven: 0, its DT's samsung,spi-feedback-delay): xnu patch 0146 writes it to FB_CLK[1:0]; without it
+    # (bluejay) the node is unchanged and the driver keeps writing 1.
+    def fb_delay():
+        v = config['touch_spi_fb_delay']
+        if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 3:
+            raise ValueError('touch_spi_fb_delay %r: must be an integer 0..3' % (v,))
+        return v
     def touch_node():
+        if touch_proto not in ('ftm5', 'sec_ts'):
+            raise ValueError('touch_protocol %r: must be ftm5 or sec_ts' % (touch_proto,))
+        if (touch_proto == 'sec_ts') == ('touch_chip_id' in config):
+            raise ValueError('touch_chip_id is for ftm5 only, and ftm5 needs it')
         usi = config['touch_usi']
         pin = lambda key: u64(config[config[key][0] + '_bank'], config[key][1])
         return node('sweet-touch', [
             ph(),
             ('compatible', cstr('google,gs101-ftm5-spi')),
+        ] + ([('protocol', cstr('sec_ts'))] if touch_proto == 'sec_ts' else []) + [
             ('reg', u64(config['usi%d_spi_base' % usi], config['usi%d_spi_size' % usi])),
             ('usi-regs-offset', u32(config['usi_regs_offset'])),
             ('usi-mode-reg', u64(config['usi%d_mode_reg' % usi])),
             ('usi-mode-spi', u32(config['usi_mode_spi'])),
             ('usi-mode-mask', u32(config['usi_mode_mask'])),
             ('spi-pin-func', u32(config['touch_spi_pin_func'])),
+        ] + ([('spi-fb-delay', u32(fb_delay()))] if 'touch_spi_fb_delay' in config else []) + [
             ('max-hz', u32(config['touch_max_hz'])),
-            ('chip-id', u32(*config['touch_chip_id'])),
+        ] + ([('chip-id', u32(*config['touch_chip_id']))] if touch_proto == 'ftm5' else []) + [
             ('max-coords', u32(*config['touch_max_coords'])),
             ('screen', u32(config['fb_width'], config['fb_height'])),
             ('pin-clk', pin('touch_pin_clk')),
@@ -323,7 +339,7 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', no_ufs=False, wla
                ('cmutop-gate-bit', u32(n(t['gate_bit'])))] if t else []
         return ([('cmu-reg', u64(n(c['base']), n(c['size'])))] + [(p, u32(n(o[k]))) for p, k in names] +
                 [(p, u32(n(b[k]))) for p, k in bits] + top)
-    touch = touch_node() if 'touch_chip_id' in config and not qemu else None
+    touch = touch_node() if ('touch_chip_id' in config or touch_proto != 'ftm5') and not qemu else None
 
     # bsd/dev/sweet_wlan.c (patches 0124, 0129): the BCM4389 behind the PCIe1 link the shim left up (--wlan-hold). All addresses come from soc.json
     # wlan (sources cited there): reg = BAR0 ATU window (mem, 64 KiB), cfg = endpoint config space, atu = DBI ATU block, elbi = PCIe1 ELBI (link state), pmu-iso = PHY isolation word.

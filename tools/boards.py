@@ -81,8 +81,9 @@ def _touch_macros(v):
     d("USI_MODE_MASK", v["usi_mode_mask"])
     d("SPI_FUNC", v["touch_spi_pin_func"])
     # touch_protocol picks the shim's identify sequence. FTM5 (bluejay) has a fixed chip id in its DT; sec_ts (raven's
-    # S6SY79x) has none, and validates the reply frame instead. A sec_ts board must not carry touch_chip_id: that key also
-    # makes tools/mkadt.py emit /sweet-touch, which starts the FTM5-only XNU driver (patches 0088-0095).
+    # S6SY79x) has none, and validates the reply frame instead. A sec_ts board must not carry touch_chip_id: tools/mkadt.py
+    # puts it into /sweet-touch only for FTM5, and refuses the combination (the XNU driver, patch 0146, picks sec_ts by the
+    # node's "protocol" property, which mkadt adds for sec_ts).
     proto = v.get("touch_protocol", "ftm5")
     if not isinstance(proto, str) or proto not in ("ftm5", "sec_ts"):
         raise ValueError(f"touch_protocol = {proto!r}: must be 'ftm5' or 'sec_ts'")
