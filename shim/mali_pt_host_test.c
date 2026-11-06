@@ -49,6 +49,23 @@ main(void)
 	assert(mali_va_free(&f, MALI_VA_START + 777 * MALI_PG, 3) == 0);
 	assert(mali_va_alloc(&f, 4, 1) == 0 && mali_va_alloc(&f, 3, 1) == MALI_VA_START + 777 * MALI_PG);
 
+	/* patch 0149: an executable mapping never crosses a 16 MB line (Linux panfrost_gem_open); data mappings keep 16 KB alignment */
+	const uint64_t W = 16ull << 20;
+	assert(MALI_EXEC_WINDOW_PAGES == 4096);
+	assert(mali_va_align(12, 4, 0) == 4 && mali_va_align(40000, 4, 0) == 4);
+	assert(mali_va_align(4, 4, MALI_F_EXEC) == 4 && mali_va_align(12, 4, MALI_F_EXEC) == 16);
+	assert(mali_va_align(4096, 4, MALI_F_EXEC) == 4096 && mali_va_align(4100, 4, MALI_F_EXEC) == 0);
+	assert(mali_va_align(0, 4, MALI_F_EXEC) == 0);
+	/* every 16 KB-multiple code size up to 16 MB, placed after an odd-sized data mapping that pushes the hint off any line */
+	for (uint32_t np = 4; np <= 4096; np += 4) {
+		static struct mali_va e;
+		memset(&e, 0, sizeof(e));
+		assert(mali_va_alloc(&e, 4u * 1023u, 4) == MALI_VA_START);
+		uint64_t x = mali_va_alloc(&e, np, mali_va_align(np, 4, MALI_F_EXEC));
+		assert(x != 0 && x >= MALI_VA_START + 4u * 1023u * MALI_PG);
+		assert(x / W == (x + (uint64_t)np * MALI_PG - 1) / W);
+	}
+
 	struct mali_pt p;
 	assert(mali_pt_init(&p, (struct mali_pt_ops){ talloc, NULL }) == 0);
 	assert(p.l0[0] == (p.l1_pa | 0x403ull));

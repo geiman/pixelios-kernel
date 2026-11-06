@@ -606,6 +606,11 @@ else
 	chk "wlan_fw_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -I$O -o $O/wlan_fw_host_test wlan_fw_host_test.c
 	chk "wlan_fw_host_test" $O/wlan_fw_host_test
 	awk '$0=="+++ b/bsd/dev/sweet_mali_pt.h"{on=1;next} on&&/^--- /{exit} on&&/^diff /{exit} on&&/^@@/{next} on&&/^\+/{print substr($0,2)}' ../xnu/patches/0104-sweet-mali-driver-core.patch > $O/sweet_mali_pt.h
+	# patch 0149 adds mali_va_align (16 MB window for executable mappings): apply its hunk for the header on top of the 0104 text
+	awk '/^diff --git a\/bsd\/dev\/sweet_mali_pt.h /{on=1;print;next} on&&/^diff --git /{exit} on{print}' ../xnu/patches/0149-sweet-mali-exec-16m-window.patch > $O/sweet_mali_pt.0149.diff
+	rm -rf $O/mpt; mkdir -p $O/mpt/bsd/dev; cp $O/sweet_mali_pt.h $O/mpt/bsd/dev/
+	patch -s -p1 -d $O/mpt < $O/sweet_mali_pt.0149.diff || { echo "FAIL patch 0149 does not apply to sweet_mali_pt.h" >&2; exit 1; }
+	cp $O/mpt/bsd/dev/sweet_mali_pt.h $O/sweet_mali_pt.h
 	chk "mali_pt_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -I$O -o $O/mali_pt_host_test mali_pt_host_test.c
 	chk "mali_pt_host_test" $O/mali_pt_host_test
 	# runtime MMIO poke parser of the same driver (xnu patch 0093, new-file hunk)

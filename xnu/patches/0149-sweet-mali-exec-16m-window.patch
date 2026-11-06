@@ -1,0 +1,57 @@
+SWEET Mali executable mappings stay inside one 16 MB window (patch 0149): sweet_mali_map aligns a SWEET_MALI_EXEC mapping to the next power of two of its size (sweet_mali_pt.h mali_va_align) and refuses executable mappings over 16 MB with EINVAL. Linux panfrost v6.12 panfrost_gem_open() keeps executable BOs off 16 MB boundaries for every GPU it drives, valhall-jm included ("the program counter is 24-bits") [src]; 0104 aligned every mapping to 16 KB only. Non-executable mappings are unchanged.
+diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
+--- a/bsd/dev/sweet_mali.c
++++ b/bsd/dev/sweet_mali.c
+@@ -356,8 +356,14 @@ sweet_mali_map(const uint64_t *pa16k, uint32_t n, uint32_t flags, uint64_t *va_o
+ 			return EFAULT;
+ 		}
+ 	}
++	/* executable: power-of-two aligned so it stays inside one 16 MB window (sweet_mali_pt.h mali_va_align); larger code is refused */
++	uint32_t align = mali_va_align(n * 4u, 4u, (flags & SWEET_MALI_EXEC) ? MALI_F_EXEC : 0);
++	if (align == 0) {
++		printf("SWEET MALI: map refused, executable mapping of %u x 16 KB exceeds one 16 MB window\n", n);
++		return EINVAL;
++	}
+ 	lck_mtx_lock(&sm_lock);
+-	va = mali_va_alloc(&sm.va, n * 4u, 4u);
++	va = mali_va_alloc(&sm.va, n * 4u, align);
+ 	if (va == 0) {
+ 		lck_mtx_unlock(&sm_lock);
+ 		return ENOMEM;
+diff --git a/bsd/dev/sweet_mali_pt.h b/bsd/dev/sweet_mali_pt.h
+--- a/bsd/dev/sweet_mali_pt.h
++++ b/bsd/dev/sweet_mali_pt.h
+@@ -64,6 +64,33 @@ mali_va_alloc(struct mali_va *v, uint32_t npages, uint32_t align_pages)
+ 	return 0;
+ }
+ 
++/*
++ * Executable mappings must not cross a 16 MB boundary: Linux panfrost (v6.12 panfrost_gem.c, panfrost_gem_open(),
++ * "the program counter is 24-bits") enforces this for every GPU it drives, valhall-jm included, with no
++ * architecture check [src]. Linux aligns an executable BO to its size, which still lets a size that is not a
++ * power of two cross a line; aligning to the next power of two (<= 16 MB) cannot. mali_va_alloc aligns page
++ * indices relative to MALI_VA_START, so that must itself sit on a 16 MB line for the alignment to be absolute.
++ */
++#define MALI_EXEC_WINDOW_PAGES  ((16ull << 20) / MALI_PG)
++_Static_assert(MALI_VA_START % (MALI_EXEC_WINDOW_PAGES * MALI_PG) == 0, "VA window start must be 16 MB aligned");
++
++/* alignment (4 KB pages) to pass mali_va_alloc for npages; 0 = an executable mapping that cannot fit one 16 MB window */
++static inline uint32_t
++mali_va_align(uint32_t npages, uint32_t base_align, uint32_t flags)
++{
++	if (!(flags & MALI_F_EXEC)) {
++		return base_align;
++	}
++	if (npages == 0 || npages > MALI_EXEC_WINDOW_PAGES) {
++		return 0;
++	}
++	uint32_t a = base_align;
++	while (a < npages) {
++		a <<= 1;
++	}
++	return a;
++}
++
+ /* 0 = freed, -1 = the range was not fully allocated or is outside the window (nothing changed) */
+ static inline int
+ mali_va_free(struct mali_va *v, uint64_t va, uint32_t npages)
