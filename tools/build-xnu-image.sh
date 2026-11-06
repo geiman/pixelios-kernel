@@ -1,6 +1,12 @@
 #!/bin/bash
-# One-shot XNU boot image for bluejay: payload (kernel + ADT + boot-args) + shim, written to shim/out/shim-boot-avb.img.
-#   tools/build-xnu-image.sh [--kernel K] [--adt A] [--qr SECONDS|off] [--rw] [--args "extra boot-args"] [--out FILE]
+# One-shot XNU boot image: payload (kernel + ADT + boot-args) + shim, written to shim/out/shim-boot-avb.img.
+#   tools/build-xnu-image.sh [--board bluejay|raven] [--kernel K] [--adt A] [--qr SECONDS|off] [--rw] [--args "extra boot-args"] [--out FILE]
+#   --board B    bluejay (default; unchanged) or raven (Pixel 6 Pro). raven: --kernel is required, the ADT is made fresh with
+#                tools/mkadt.py --board raven unless --adt is given (needs research/ipsw-x/d22ap.adt for /product, docs/REQUIREMENTS.md),
+#                and the options never tried on raven (--usbnet, --usbdma, --dvfs, --gpu-handover, --wlan-hold, --wlanfw) are refused.
+#   --touch      raven only: the board.json touch_xnu_bootargs (the sec_ts touch driver's clock/mux/chip-select recipe, xnu 0146) and
+#                --rails. Observed working: device/google/raven/hardware/touch-xnu-2026-11-06.txt.
+#                Lock screen + touch on raven = --board raven --kernel K --cpus 8 --rw --gui --touch
 #   --qr off     (default) no QR takeover: the screen keeps the iOS GUI; use this for GUI runs
 #   --qr 40      QR log loop takes over the screen 40 s after the root mount starts (read with tools/qr-log.py --esp)
 #                QL2 (default format; sweetqr_fmt=1 = the old QL1) knobs go in --args: sweetqr_ver=10 sweetqr_ecc=0 sweetqr_tiles=2 sweetqr_ms=800
@@ -21,20 +27,36 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 A=${ARTIFACTS:-$HOME/pixelios-artifacts}
-kernel=$A/xnu-0085/kernel.development.sweet; adt=$A/xnu-0085-root/A.adt; qr=off; rw=0; gui=0; usbnet=0; usbdma=0; rails=0; handover=0; dvfs=""; restart=""; cpus=1; extra=""; out=""; overlay=""; wlanfw=""; wlan=0; wlanlvl=1
+kernel=$A/xnu-0085/kernel.development.sweet; adt=$A/xnu-0085-root/A.adt; qr=off; rw=0; gui=0; usbnet=0; usbdma=0; rails=0; handover=0; dvfs=""; restart=""; cpus=1; extra=""; out=""; overlay=""; wlanfw=""; wlan=0; wlanlvl=1; board=bluejay; touch=0; kernel_set=0; adt_set=0
 while [ $# -gt 0 ]; do case "$1" in
-	--kernel) kernel=$2; shift 2 ;; --adt) adt=$2; shift 2 ;; --qr) qr=$2; shift 2 ;;
+	--kernel) kernel=$2; kernel_set=1; shift 2 ;; --adt) adt=$2; adt_set=1; shift 2 ;; --qr) qr=$2; shift 2 ;; --board) board=$2; shift 2 ;; --touch) touch=1; shift ;;
 	--rw) rw=1; shift ;; --rails) rails=1; shift ;; --wlan-hold) wlan=1; shift ;; --wlan-level) wlanlvl=$2; shift 2 ;; --gpu-handover) handover=1; shift ;; --dvfs) dvfs=$2; shift 2 ;; --gui) gui=1; shift ;; --usbnet) usbnet=1; shift ;; --usbdma) usbnet=1; usbdma=1; shift ;; --cpus) cpus=$2; shift 2 ;; --restart) restart=$2; shift 2 ;; --args) extra=$2; shift 2 ;; --out) out=$2; shift 2 ;; --overlay) overlay=$2; shift 2 ;; --wlanfw) wlanfw=$2; shift 2 ;;
 	*) echo "unknown option $1" >&2; exit 2 ;; esac; done
 [ -z "$wlanfw" ] || [ "$wlan" = 1 ] || { echo "--wlanfw needs --wlan-hold" >&2; exit 2; }
 case "$wlanlvl" in 1|2) ;; *) echo "--wlan-level needs 1 or 2" >&2; exit 2 ;; esac
 [ "$wlan" = 1 ] || [ "$wlanlvl" = 1 ] || { echo "--wlan-level needs --wlan-hold" >&2; exit 2; }
+case "$board" in bluejay|raven) ;; *) echo "--board needs bluejay or raven" >&2; exit 2 ;; esac
+touchargs=""
+if [ "$board" = raven ]; then
+	[ "$kernel_set" = 1 ] || { echo "--board raven needs --kernel (there is no default raven kernel)" >&2; exit 2; }
+	for o in "usbnet:$usbnet" "dvfs:${dvfs:+1}" "gpu-handover:$handover" "wlan-hold:$wlan" "wlanfw:${wlanfw:+1}"; do
+		case "${o#*:}" in ""|0) ;; *) echo "--${o%%:*} was never tried on raven: refused with --board raven" >&2; exit 2 ;; esac
+	done
+	if [ "$touch" = 1 ]; then
+		touchargs=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("touch_xnu_bootargs", ""))' device/google/raven/board.json)
+		[ -n "$touchargs" ] || { echo "--touch: device/google/raven/board.json has no touch_xnu_bootargs" >&2; exit 2; }
+		rails=1
+	fi
+elif [ "$touch" = 1 ]; then
+	echo "--touch is raven only (bluejay's FTM5 recipe is not in board.json)" >&2; exit 2
+fi
 args="debug=0xc serial=3 cpus=$cpus keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 wdt_test=no_user_checkin sweetusb=0 rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1"
 [ "$usbnet" = 1 ] && args=${args/sweetusb=0/sweetusb=2}   # replace, never add: a duplicate key is ambiguous (review 17 L5: for key=value the LAST one wins in PE_parse_boot_argn, so `--gui --args sweetfb_noconsole=2` gives 2)
 [ "$usbdma" = 1 ] && args="$args sweetusbdma=1"
 [ "$rw" = 1 ] && args="$args ufsrw=1 rootrw=1"
 [ "$gui" = 1 ] && args="$args sweetfb_noconsole=1 sweetfb_hz=30"
 case "$qr" in off|0) ;; *[!0-9]*) echo "--qr needs seconds or off" >&2; exit 2 ;; *) args="$args sweetqr=$qr" ;; esac
+[ -n "$touchargs" ] && args="$args $touchargs"
 [ -n "$restart" ] && args="$args sweetrestart=$restart"
 [ "$handover" = 0 ] || args="$args sweetgpu=0x1C500000"   # patch 0102 reads the GPU; sweetgpujob=1 (patch 0103, WRITES) only via --args
 [ "$wlan" = 0 ] || args="$args sweetwlan=$wlanlvl"   # patch 0124: read-only attach, needs the --wlan-hold shim flavor (link left up)
@@ -46,10 +68,13 @@ railsarg=(); words=""; dvfsarg=(); hoarg=(); [ "$handover" = 0 ] || hoarg=(--gpu
 if [ "$dvfs" = read ]; then words="${words:+$words,}dvfsr"
 elif [ -n "$dvfs" ]; then words="${words:+$words,}dvfs"; dvfsarg=(--dvfs "$dvfs"); fi
 [ -z "$words" ] || railsarg=(--touch-probe="$words")
-p=$(mktemp /tmp/payload.XXXXXX.bin); ov=""; rdarg=(); trap 'rm -f "$p" "$ov"' EXIT
+p=$(mktemp /tmp/payload.XXXXXX.bin); ov=""; tadt=""; rdarg=(); trap 'rm -f "$p" "$ov" "$tadt"' EXIT
 if [ -n "$overlay" ]; then ov=$(mktemp /tmp/devoverlay.XXXXXX.bin); python3 -I tools/mkdevoverlay.py "$overlay" "$ov" >&2 || exit 2; rdarg=(--ramdisk "$ov"); fi
-[ -z "${XNU_IMAGE_ARGS_ONLY:-}" ] || { echo "boot-args: $args"; exit 0; }   # test hook (tools/test_build_overlay_args.py)
-python3 -I tools/mkpayload.py "$kernel" "$adt" "$p" --board bluejay --cmdline "$args" "${rdarg[@]}" ${wlanfw:+--wlanfw "$wlanfw"} >/dev/null
-META_ARGS="$args" XNU_UFS=1 shim/build.sh --board bluejay --avb --boot-xnu "$p" "${railsarg[@]}" "${dvfsarg[@]}" "${hoarg[@]}" >/dev/null
+[ -z "${XNU_IMAGE_ARGS_ONLY:-}" ] || { echo "shim: --board $board ${railsarg[*]} ${dvfsarg[*]} ${hoarg[*]}"; echo "boot-args: $args"; exit 0; }   # test hook (tools/test_build_overlay_args.py, test_build_xnu_image_raven.py)
+if [ "$board" = raven ] && [ "$adt_set" = 0 ]; then
+	tadt=$(mktemp /tmp/raven-adt.XXXXXX); python3 -I tools/mkadt.py --board raven "$tadt" >&2; adt=$tadt
+fi
+python3 -I tools/mkpayload.py "$kernel" "$adt" "$p" --board "$board" --cmdline "$args" "${rdarg[@]}" ${wlanfw:+--wlanfw "$wlanfw"} >/dev/null
+META_ARGS="$args" XNU_UFS=1 shim/build.sh --board "$board" --avb --boot-xnu "$p" "${railsarg[@]}" "${dvfsarg[@]}" "${hoarg[@]}" >/dev/null
 [ -z "$out" ] || cp shim/out/shim-boot-avb.img "$out"
 echo "boot-args: $args"; echo "image: ${out:-shim/out/shim-boot-avb.img}"
