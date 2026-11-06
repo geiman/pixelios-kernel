@@ -31,7 +31,8 @@ struct smc_res {
 	uint64_t a0, a1, a2, a3;
 };
 
-#ifndef __aarch64__
+/* Target-only asm: the shim is built -ffreestanding (__STDC_HOSTED__ 0). Host tests are hosted, also on an arm64 host, where these EL1/EL3 instructions trap (SIGILL). */
+#if !defined(__aarch64__) || __STDC_HOSTED__
 /* host test: the fake EL3 */
 void wlan_host_smc(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, struct smc_res *r);
 #ifdef WLAN_ISO_RUN
@@ -44,7 +45,7 @@ __attribute__((noipa)) static int smc_priv_read(uint64_t pa, struct smc_res *r)
 {
 	if (pa != WLAN_PMU_PCIE1_ISO && pa != WLAN_PMU_PCIE0_ISO)
 		return -1;
-#ifdef __aarch64__
+#if defined(__aarch64__) && !__STDC_HOSTED__
 	register uint64_t x0 __asm__("x0") = SMC_FID_PRIV_REG;
 	register uint64_t x1 __asm__("x1") = pa;
 	register uint64_t x2 __asm__("x2") = PRIV_REG_OPTION_READ;
@@ -173,7 +174,7 @@ int wlan_smc_read(void)
 /* The two RMW SMCs (x5..x7 = 0 like Linux's arm_smccc_smc(.., 0, 0, 0), review F7). Constants only: no parameter can carry the function id, the register, the option, the mask or the value. noipa: they stay separate symbols (the object audit reads them). */
 __attribute__((noipa)) static void smc_priv_rmw_set(struct smc_res *r)
 {
-#ifdef __aarch64__
+#if defined(__aarch64__) && !__STDC_HOSTED__
 	register uint64_t x0 __asm__("x0") = SMC_FID_PRIV_REG;
 	register uint64_t x1 __asm__("x1") = ISO_REG;
 	register uint64_t x2 __asm__("x2") = PRIV_REG_OPTION_RMW;
@@ -198,7 +199,7 @@ __attribute__((noipa)) static void smc_priv_rmw_set(struct smc_res *r)
 
 __attribute__((noipa)) static void smc_priv_rmw_clear(struct smc_res *r)
 {
-#ifdef __aarch64__
+#if defined(__aarch64__) && !__STDC_HOSTED__
 	register uint64_t x0 __asm__("x0") = SMC_FID_PRIV_REG;
 	register uint64_t x1 __asm__("x1") = ISO_REG;
 	register uint64_t x2 __asm__("x2") = PRIV_REG_OPTION_RMW;

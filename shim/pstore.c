@@ -94,9 +94,10 @@ static uint32_t zone_cap;		/* zone_size - 12 usable data bytes */
 static uint64_t zone_base;
 static int ready, used_fallback;
 
+/* Target-only asm: the shim is built -ffreestanding (__STDC_HOSTED__ 0). Host tests are hosted, also on an arm64 host, where these EL1/EL3 instructions trap (SIGILL). */
 static inline void dsb_sy(void)
 {
-#ifdef __aarch64__
+#if defined(__aarch64__) && !__STDC_HOSTED__
 	__asm__ volatile("dsb sy" ::: "memory");
 #else
 	__asm__ volatile("" ::: "memory");
@@ -105,7 +106,7 @@ static inline void dsb_sy(void)
 
 static uint64_t my_mpidr(void)
 {
-#ifdef __aarch64__
+#if defined(__aarch64__) && !__STDC_HOSTED__
 	uint64_t m;
 	__asm__ volatile("mrs %0, mpidr_el1" : "=r"(m));
 	return m;
@@ -126,7 +127,7 @@ static int save_lock(void)
 	uint64_t self = my_mpidr();
 	if (save_owner == self)
 		return 1;
-#ifdef __aarch64__
+#if defined(__aarch64__) && !__STDC_HOSTED__
 	for (int i = 0; i < 64; i++) {
 		uint64_t old;
 		uint32_t ok;
