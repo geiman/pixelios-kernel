@@ -320,8 +320,8 @@ static void test_save_into_fake_zone(void)
 static void test_save_tail_keep(void)
 {
 	/* console-size 0x1000 -> data cap 0xff4; append more than that. */
-	uint8_t *zone = malloc(0x1000);
-	memset(zone, 0xee, 0x1000);
+	uint8_t *zone = malloc(0x1004);	/* 0x1000 zone + a sentinel past it (read below as zone[12 + 0xff4]) */
+	memset(zone, 0xee, 0x1004);
 	struct fdt_builder b;
 	fb_init(&b);
 	fb_begin_node(&b, "");

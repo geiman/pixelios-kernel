@@ -24,11 +24,12 @@ static unsigned fb_w = FB_W, fb_h = FB_H, fb_stride = FB_STRIDE;
 static uint32_t con_bg;
 static int row;
 
+/* Target-only asm: the shim is built -ffreestanding (__STDC_HOSTED__ 0). Host tests are hosted, also on an arm64 host, where these EL1/EL3 instructions trap (SIGILL). */
 uint64_t counter_freq(void)
 {
 #if SOC_GS101
 	return TIMER_FREQ;
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) && !__STDC_HOSTED__
 	uint64_t f;
 	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
 	return f;
@@ -55,7 +56,7 @@ void con_service(void)
 
 void wait_ticks(uint64_t ticks)
 {
-#ifdef __aarch64__
+#if defined(__aarch64__) && !__STDC_HOSTED__
 	uint64_t cntkctl;
 	__asm__ volatile("mrs %0, cntkctl_el1" : "=r"(cntkctl));
 	cntkctl |= (1 << 2) | (13 << 4); /* EVNTEN, EVNTI=13 (~2^14 ticks ≈ 0.67 ms @24.576 MHz) */
@@ -103,7 +104,7 @@ static void uart_char(char c)
 	volatile uint32_t *base = (volatile uint32_t *)UART_BASE;
 	if (!UART_BASE || uart_dead)
 		return;
-#ifdef __aarch64__
+#if defined(__aarch64__) && !__STDC_HOSTED__
 	uint64_t start;
 	__asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(start));
 	uint64_t deadline = start + counter_freq() / 1000; /* ~1 ms */
