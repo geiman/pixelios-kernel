@@ -1,0 +1,220 @@
+SWEET memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/research/44 step 3): once, sweetmemtestdelay s after UFS is up, allocate up to sweetmemtestgb GiB (default 3) in 32 MiB chunks, never below sweetmemtestfloor GiB free (default 5), count pages per 1 GiB granule, pattern-test every page past the old 4 GiB window through DRAM, and READ one UFS block straight into one page per new granule (ufs_data_pa override, reads only) to compare with the bounce-buffer copy; print per-granule lines and RESULT PASS/FAIL/INCOMPLETE.
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -49,6 +49,7 @@ extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
+ extern void thread_deallocate(thread_t);
+ extern int hz;
+ static void sweet_log_start(void);
++static void sweet_memtest_start(void);
+ extern void sweet_qr_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_restart_poll(void);   /* bsd/dev/sweet_restart.c */
+@@ -123,6 +124,13 @@ static struct {
+ static LCK_GRP_DECLARE(sweet_ufs_grp, "sweet_ufs");
+ static LCK_MTX_DECLARE(sweet_ufs_lock, &sweet_ufs_grp);
+ 
++/*
++ * Memory self-test only (boot-arg sweetmemtest=1, patch 0148): when non-zero, the data of the next READ of at most one 4 KiB block
++ * goes to this physical address instead of the bounce buffer. Set and cleared under sweet_ufs_lock by mt_ufs_read_into(); never used
++ * for a write (ufs_scsi ignores it when write is set).
++ */
++static uint64_t ufs_data_pa;
++
+ static inline uint32_t
+ ufs_rd(uint32_t off)
+ {
+@@ -162,6 +170,7 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 	uint64_t ucd_pa = su.dma_pa + DMA_UCD, bounce_pa = su.dma_pa + DMA_BOUNCE;
+ 
+ 	assert(len <= BOUNCE_SIZE);
++	const uint64_t data_pa = (ufs_data_pa && !write && len <= UFS_BLOCK) ? ufs_data_pa : bounce_pa;
+ 	bzero(utrd, sizeof(*utrd));
+ 	bzero(ucd, sizeof(*ucd));
+ 
+@@ -188,8 +197,8 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 		uint32_t n = 0;
+ 		for (uint32_t done = 0; done < len; done += prdt_chunk, n++) {
+ 			uint32_t chunk = MIN(prdt_chunk, len - done);
+-			ucd->prdt[n].addr_lo = (uint32_t)(bounce_pa + done);
+-			ucd->prdt[n].addr_hi = (uint32_t)((bounce_pa + done) >> 32);
++			ucd->prdt[n].addr_lo = (uint32_t)(data_pa + done);
++			ucd->prdt[n].addr_hi = (uint32_t)((data_pa + done) >> 32);
+ 			ucd->prdt[n].dbc = chunk - 1;
+ 		}
+ 		utrd->prdt = (1024u / gran) << 16 | (su.gs101 ? 16 * n : n);
+@@ -705,6 +714,7 @@ sweet_ufs_init(void)
+ 	sweet_touch_gs101_init();     /* no-op without the ADT node /sweet-touch (bluejay only) */
+ 	sweet_gpu_gs101_init();       /* no-op without boot-arg sweetgpu= */
+ 	sweet_wlan_init();            /* no-op without boot-arg sweetwlan= */
++	sweet_memtest_start();        /* no-op without boot-arg sweetmemtest=1 */
+ 	return 0;
+ }
+ 
+@@ -1009,4 +1019,167 @@ sweet_ufs_rootdev(dev_t *dev)
+ 	*dev = su.bdev;
+ 	return 0;
+ }
++
++/*
++ * Memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/research/44 step 3). Raven's XNU window grew from 4 GiB to
++ * the whole 10 GiB high bank; the log never showed a page above the old window in use. Once, sweetmemtestdelay seconds (default 60)
++ * after the UFS driver is up:
++ *  1. allocate kernel memory in 32 MiB chunks (KMA_NOPAGEWAIT) until sweetmemtestgb GiB (default 3, 1..8) or until the free count would
++ *     drop below sweetmemtestfloor GiB (default 5, at least 1), and count
++ *     the physical pages of each 1 GiB granule (PA >> 30);
++ *  2. on every page in a granule past the old window (from gPhysBase + 4 GiB), write a PA-derived pattern, clean+invalidate it to DRAM,
++ *     read it back (errors are counted);
++ *  3. for one page per such granule, READ the partition's first 4 KiB block twice under the UFS lock (no write can land between):
++ *     into the bounce buffer, then straight into that page (poisoned with 0xA5 first), and compare;
++ *  4. free everything and print one line per granule and a RESULT line.
++ * UFS is only READ. The pages are the test's own allocation: nothing else is written.
++ */
++extern unsigned long gPhysBase;                 /* osfmk/arm64/arm_vm_init.c:127 */
++extern unsigned int vm_page_free_count;         /* osfmk/vm/vm_page.h:1297 */
++extern vm_map_address_t phystokv(uint64_t pa);  /* osfmk/arm/pmap/pmap.h:527 (pmap_paddr_t = uint64_t), not visible from bsd/ */
++#define MT_CHUNK        (32ull << 20)
++#define MT_CHUNKS       256u                    /* at most 8 GiB */
++#define MT_GRANULES     64u                     /* PA < 64 GiB */
++#define MT_SEED         0x5a3c96e1f00dbeefull
++
++static vm_offset_t mt_chunk[MT_CHUNKS];
++static uint8_t mt_ref[UFS_BLOCK];
++static uint32_t mt_delay_s = 60, mt_cap_gb = 3, mt_floor_gb = 5;
++
++/* Step 3 for one page: 0 = the block read into pa equals the one read through the bounce buffer, 1 = it differs, else an errno. */
++static int
++mt_ufs_read_into(uint64_t pa)
++{
++	volatile uint8_t *dst = (volatile uint8_t *)phystokv(pa);
++	int err;
++
++	if ((pa & (UFS_BLOCK - 1)) != 0) {
++		return EINVAL;
++	}
++	lck_mtx_lock(&sweet_ufs_lock);
++	err = ufs_read_blocks(su.first_block, 1);
++	if (!err) {
++		memcpy(mt_ref, (const void *)(su.dma + DMA_BOUNCE), UFS_BLOCK);
++		for (unsigned i = 0; i < UFS_BLOCK; i++) {
++			dst[i] = 0xa5;          /* a DMA that silently did not happen leaves the poison */
++		}
++		flush_dcache64((addr64_t)pa, UFS_BLOCK, TRUE);
++		ufs_data_pa = pa;
++		err = ufs_read_blocks(su.first_block, 1);
++		ufs_data_pa = 0;
++		flush_dcache64((addr64_t)pa, UFS_BLOCK, TRUE);
++	}
++	lck_mtx_unlock(&sweet_ufs_lock);
++	if (err) {
++		return err;
++	}
++	for (unsigned i = 0; i < UFS_BLOCK; i++) {
++		if (dst[i] != mt_ref[i]) {
++			return 1;
++		}
++	}
++	return 0;
++}
++
++static void
++mt_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	static uint32_t pages[MT_GRANULES], tested[MT_GRANULES], errors[MT_GRANULES];
++	static uint64_t probe[MT_GRANULES];
++	const unsigned old_end = (unsigned)((gPhysBase >> 30) + 4);
++	const unsigned last = (unsigned)((gPhysBase + mem_size - 1) >> 30);
++	unsigned nchunks = 0, unmapped = 0, bad = 0, missing = 0;
++	uint32_t free_before;
++
++	delay_for_interval(mt_delay_s * 1000u, 1000 * NSEC_PER_USEC);
++	free_before = vm_page_free_count;
++	printf("SWEET MEM: test start, RAM 0x%lx + 0x%lx, new granules 0x%x..0x%x, free pages %u, cap %u GiB, floor %u GiB\n",
++	    gPhysBase, (unsigned long)mem_size, old_end, last, free_before, mt_cap_gb, mt_floor_gb);
++	const unsigned max_chunks = (unsigned)(((uint64_t)mt_cap_gb << 30) / MT_CHUNK);
++	const uint64_t floor_pages = ((uint64_t)mt_floor_gb << 30) / PAGE_SIZE;
++	while (nchunks < max_chunks && vm_page_free_count > floor_pages + MT_CHUNK / PAGE_SIZE) {
++		if (kmem_alloc(kernel_map, &mt_chunk[nchunks], MT_CHUNK, KMA_DATA | KMA_NOPAGEWAIT, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
++			break;
++		}
++		vm_offset_t base = mt_chunk[nchunks++];
++		for (vm_offset_t va = base; va < base + MT_CHUNK; va += PAGE_SIZE) {
++			uint64_t pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)va));
++			if (pa == 0) {
++				unmapped++;
++				continue;
++			}
++			unsigned gb = (unsigned)(pa >> 30);
++			if (gb >= MT_GRANULES) {
++				continue;
++			}
++			pages[gb]++;
++			if (gb < old_end) {
++				continue;
++			}
++			volatile uint64_t *w = (volatile uint64_t *)va;
++			for (unsigned i = 0; i < PAGE_SIZE / 8; i++) {
++				w[i] = (pa + 8ull * i) ^ MT_SEED;
++			}
++			flush_dcache64((addr64_t)pa, PAGE_SIZE, TRUE);   /* to DRAM and out of the cache: the read below comes from DRAM */
++			for (unsigned i = 0; i < PAGE_SIZE / 8; i++) {
++				if (w[i] != ((pa + 8ull * i) ^ MT_SEED)) {
++					errors[gb]++;
++				}
++			}
++			tested[gb]++;
++			if (probe[gb] == 0) {
++				probe[gb] = pa;
++			}
++		}
++	}
++	printf("SWEET MEM: allocated %u x 32 MiB, %u pages unmapped, free pages %u\n", nchunks, unmapped, vm_page_free_count);
++	for (unsigned gb = (unsigned)(gPhysBase >> 30); gb <= last && gb < MT_GRANULES; gb++) {
++		int ufs = -1;
++		if (gb >= old_end && probe[gb]) {
++			ufs = mt_ufs_read_into(probe[gb]);
++		}
++		if (gb >= old_end && (!tested[gb] || ufs != 0 || errors[gb])) {
++			if (!tested[gb]) {
++				missing++;
++			} else {
++				bad++;
++			}
++		}
++		printf("SWEET MEM: GB 0x%x pages %u%s tested %u errors %u ufs-dma %s (pa 0x%llx)\n", gb, pages[gb],
++		    gb < old_end ? " (old window)" : "", tested[gb], errors[gb],
++		    ufs == -1 ? "-" : ufs == 0 ? "match" : ufs == 1 ? "MISMATCH" : "ERROR", probe[gb]);
++	}
++	while (nchunks) {
++		nchunks--;
++		kmem_free(kernel_map, mt_chunk[nchunks], MT_CHUNK);
++	}
++	printf("SWEET MEM: RESULT %s (%u granules with errors or a UFS mismatch, %u not reached), free pages %u -> %u\n",
++	    bad ? "FAIL" : missing ? "INCOMPLETE" : "PASS", bad, missing, free_before, vm_page_free_count);
++}
++
++static void
++sweet_memtest_start(void)
++{
++	uint32_t on = 0;
++	thread_t t;
++
++	if (!PE_parse_boot_argn("sweetmemtest", &on, sizeof(on)) || on != 1) {
++		return;
++	}
++	(void)PE_parse_boot_argn("sweetmemtestdelay", &mt_delay_s, sizeof(mt_delay_s));
++	(void)PE_parse_boot_argn("sweetmemtestgb", &mt_cap_gb, sizeof(mt_cap_gb));
++	(void)PE_parse_boot_argn("sweetmemtestfloor", &mt_floor_gb, sizeof(mt_floor_gb));
++	if (mt_delay_s > 3600) {
++		mt_delay_s = 60;
++	}
++	if (mt_cap_gb < 1 || mt_cap_gb > MT_CHUNKS * MT_CHUNK / (1ull << 30)) {
++		mt_cap_gb = 3;
++	}
++	if (mt_floor_gb < 1) {
++		mt_floor_gb = 1;
++	}
++	if (kernel_thread_start(mt_thread, NULL, &t) == KERN_SUCCESS) {
++		thread_deallocate(t);
++	}
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
