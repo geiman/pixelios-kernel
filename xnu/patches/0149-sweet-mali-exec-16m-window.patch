@@ -1,34 +1,46 @@
-SWEET Mali executable mappings stay inside one 16 MB window (patch 0149): sweet_mali_map aligns a SWEET_MALI_EXEC mapping to the next power of two of its size (sweet_mali_pt.h mali_va_align) and refuses executable mappings over 16 MB with EINVAL. Linux panfrost v6.12 panfrost_gem_open() keeps executable BOs off 16 MB boundaries for every GPU it drives, valhall-jm included ("the program counter is 24-bits") [src]; 0104 aligned every mapping to 16 KB only. Non-executable mappings are unchanged.
+SWEET Mali executable mappings stay inside one 16 MB window (patch 0149): sweet_mali_map takes its GPU VA from mali_va_alloc_map (sweet_mali_pt.h, host-tested), which aligns a SWEET_MALI_EXEC mapping to the next power of two of its size and refuses executable mappings over 16 MB (EINVAL, nothing mapped); data mappings keep 16 KB alignment. One flag translation (mflags) feeds both the VA decision and the page entries. Linux panfrost v6.12 panfrost_gem_open() keeps executable BOs off 16 MB lines with no architecture check ("the program counter is 24-bits"), and panfrost_drv.c matches arm,mali-valhall-jm [src]; its model table has the G57, not the G78, so the invariant is adopted conservatively. Review 1 F1: docs/reviews/mali-exec-16m-review-1.md.
 diff --git a/bsd/dev/sweet_mali.c b/bsd/dev/sweet_mali.c
 --- a/bsd/dev/sweet_mali.c
 +++ b/bsd/dev/sweet_mali.c
-@@ -356,8 +356,14 @@ sweet_mali_map(const uint64_t *pa16k, uint32_t n, uint32_t flags, uint64_t *va_o
+@@ -356,16 +356,23 @@ sweet_mali_map(const uint64_t *pa16k, uint32_t n, uint32_t flags, uint64_t *va_o
  			return EFAULT;
  		}
  	}
-+	/* executable: power-of-two aligned so it stays inside one 16 MB window (sweet_mali_pt.h mali_va_align); larger code is refused */
-+	uint32_t align = mali_va_align(n * 4u, 4u, (flags & SWEET_MALI_EXEC) ? MALI_F_EXEC : 0);
-+	if (align == 0) {
-+		printf("SWEET MALI: map refused, executable mapping of %u x 16 KB exceeds one 16 MB window\n", n);
-+		return EINVAL;
-+	}
++	/* one translation of the caller's flags, used for both the VA decision and the page entries (tools/test_mali_exec_window_mutants.py pins it) */
++	const uint32_t mflags = (flags & SWEET_MALI_EXEC) ? MALI_F_EXEC : 0;
  	lck_mtx_lock(&sm_lock);
 -	va = mali_va_alloc(&sm.va, n * 4u, 4u);
-+	va = mali_va_alloc(&sm.va, n * 4u, align);
- 	if (va == 0) {
+-	if (va == 0) {
++	/* executable: power-of-two aligned inside one 16 MB window, larger code refused (sweet_mali_pt.h mali_va_alloc_map, host-tested) */
++	int ae = mali_va_alloc_map(&sm.va, n * 4u, mflags, &va);
++	if (ae != 0) {
  		lck_mtx_unlock(&sm_lock);
++		if (ae == -1) {
++			printf("SWEET MALI: map refused, executable mapping of %u x 16 KB exceeds one 16 MB window\n", n);
++			return EINVAL;
++		}
  		return ENOMEM;
+ 	}
+ 	for (uint32_t i = 0; i < n && !e; i++) {
+ 		flush_dcache64((addr64_t)pa16k[i], PAGE_SIZE, TRUE);          /* CPU-dirty lines of the new BO must not be written back over GPU data later */
+ 		for (uint32_t k = 0; k < 4 && !e; k++) {
+-			e = mali_pt_map(&sm.pt, va + (uint64_t)(i * 4u + k) * MALI_PG, pa16k[i] + 0x1000ull * k, flags & SWEET_MALI_EXEC ? MALI_F_EXEC : 0);
++			e = mali_pt_map(&sm.pt, va + (uint64_t)(i * 4u + k) * MALI_PG, pa16k[i] + 0x1000ull * k, mflags);
+ 		}
+ 	}
+ 	if (e) {
 diff --git a/bsd/dev/sweet_mali_pt.h b/bsd/dev/sweet_mali_pt.h
 --- a/bsd/dev/sweet_mali_pt.h
 +++ b/bsd/dev/sweet_mali_pt.h
-@@ -64,6 +64,33 @@ mali_va_alloc(struct mali_va *v, uint32_t npages, uint32_t align_pages)
+@@ -64,6 +64,53 @@ mali_va_alloc(struct mali_va *v, uint32_t npages, uint32_t align_pages)
  	return 0;
  }
  
 +/*
 + * Executable mappings must not cross a 16 MB boundary: Linux panfrost (v6.12 panfrost_gem.c, panfrost_gem_open(),
-+ * "the program counter is 24-bits") enforces this for every GPU it drives, valhall-jm included, with no
-+ * architecture check [src]. Linux aligns an executable BO to its size, which still lets a size that is not a
++ * "the program counter is 24-bits") enforces this with no architecture check, and panfrost_drv.c matches
++ * arm,mali-valhall-jm [src]. v6.12's model table (panfrost_gpu.c) lists Valhall G57 IDs, not the G78, so this is the
++ * invariant of the closest Linux driver, adopted conservatively, not a statement that v6.12 drives the G78. Linux aligns an executable BO to its size, which still lets a size that is not a
 + * power of two cross a line; aligning to the next power of two (<= 16 MB) cannot. mali_va_alloc aligns page
 + * indices relative to MALI_VA_START, so that must itself sit on a 16 MB line for the alignment to be absolute.
 + */
@@ -50,6 +62,25 @@ diff --git a/bsd/dev/sweet_mali_pt.h b/bsd/dev/sweet_mali_pt.h
 +		a <<= 1;
 +	}
 +	return a;
++}
++
++/* The whole VA decision of a GPU mapping of npages 4 KB pages with mapping flags (MALI_F_EXEC), so the host test covers what
++ * sweet_mali_map() does: 16 KB-aligned data, 16 MB-window executable. 0 and *va; -1 refused (an executable mapping larger than
++ * one 16 MB window, or npages 0): nothing allocated; -2 no free VA. */
++#define MALI_MAP_ALIGN_PAGES    4u              /* 16 KB: one XNU page */
++static inline int
++mali_va_alloc_map(struct mali_va *v, uint32_t npages, uint32_t flags, uint64_t *va)
++{
++	uint32_t a = npages ? mali_va_align(npages, MALI_MAP_ALIGN_PAGES, flags) : 0;
++	if (a == 0) {
++		return -1;
++	}
++	uint64_t x = mali_va_alloc(v, npages, a);
++	if (x == 0) {
++		return -2;
++	}
++	*va = x;
++	return 0;
 +}
 +
  /* 0 = freed, -1 = the range was not fully allocated or is outside the window (nothing changed) */

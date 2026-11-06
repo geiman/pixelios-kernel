@@ -65,6 +65,28 @@ main(void)
 		assert(x != 0 && x >= MALI_VA_START + 4u * 1023u * MALI_PG);
 		assert(x / W == (x + (uint64_t)np * MALI_PG - 1) / W);
 	}
+	/* mali_va_alloc_map is what sweet_mali_map calls: same placement rules end to end, refusal allocates nothing */
+	{
+		static struct mali_va m;
+		uint64_t d = 0, c = 0, r = 0x1234;
+		assert(mali_va_alloc_map(&m, 4u * 1023u, 0, &d) == 0 && d == MALI_VA_START);
+		assert(mali_va_alloc_map(&m, 12, 0, &r) == 0 && r == d + 4u * 1023u * MALI_PG);      /* data: 16 KB-aligned, packed */
+		assert(mali_va_alloc_map(&m, 4092, MALI_F_EXEC, &c) == 0);
+		assert(c % W == 0 && c / W == (c + 4092ull * MALI_PG - 1) / W);                     /* exec: inside one window */
+		uint32_t hint = m.hint;
+		uint64_t keep = 0x5555;
+		assert(mali_va_alloc_map(&m, 4100, MALI_F_EXEC, &keep) == -1 && keep == 0x5555 && m.hint == hint);
+		assert(mali_va_alloc_map(&m, 0, 0, &keep) == -1 && keep == 0x5555);
+		assert(mali_va_alloc_map(&m, 4100, 0, &keep) == 0);                                  /* data over 16 MB is allowed */
+		/* data stays 16 KB-aligned even when the hint is not (a 4 KB allocation before it) */
+		static struct mali_va odd;
+		uint64_t o1 = mali_va_alloc(&odd, 1, 1), o2 = 0;
+		assert(o1 == MALI_VA_START && mali_va_alloc_map(&odd, 4, 0, &o2) == 0 && o2 == MALI_VA_START + 4 * MALI_PG);
+		static struct mali_va full;
+		uint64_t all = 0;
+		assert(mali_va_alloc_map(&full, (uint32_t)MALI_VA_PAGES, 0, &all) == 0);
+		assert(mali_va_alloc_map(&full, 4, 0, &keep) == -2 && mali_va_alloc_map(&full, 4, MALI_F_EXEC, &keep) == -2);
+	}
 
 	struct mali_pt p;
 	assert(mali_pt_init(&p, (struct mali_pt_ops){ talloc, NULL }) == 0);
