@@ -225,7 +225,7 @@ if __name__ == '__main__':
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
     ap.add_argument('--wlanfw', help='BCM4389 firmware container (tools/pack_wlanfw.py) -> /chosen/memory-map WLANFW')
-    ap.add_argument('--board', choices=('sweet', 'bluejay'), default='sweet')
+    ap.add_argument('--board', choices=sorted(boards.BOARDS), default='sweet')
     a = ap.parse_args()
     blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, a.board, a.wlanfw)
     open(a.out, 'wb').write(blob)
