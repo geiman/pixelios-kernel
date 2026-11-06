@@ -27,6 +27,7 @@ gpu_rails=0
 gpu_rail_on=0
 gpu_handover=0
 gpu_s2mpu=0
+mem_probe=0
 gpu_job=0
 touch_probe=0
 touch_opts=
@@ -55,6 +56,7 @@ while [ "$#" -gt 0 ]; do
 		--gpu-probe) gpu_probe=1; shift ;;
 		--gpu-job) gpu_job=1; gpu_probe=1; gpu_rails=1; gpu_rail_on=1; gpu_power=1; gpu_s2mpu=1; shift ;;	# G2 stage 2: AS0 + one WRITE_VALUE job inside the powered window (gpujob.c)
 		--gpu-s2mpu) gpu_s2mpu=1; gpu_probe=1; shift ;;	# READ-ONLY dump of the four G3D S2MPU blocks (gpus2mpu.c)
+		--mem-probe) mem_probe=1; shift ;;	# READ-ONLY dump of the HSI2 S2MPU (UFS/PCIe DMA filter, memprobe.c, docs/research/44)
 		--gpu-rail-on) gpu_rail_on=1; gpu_rails=1; gpu_probe=1; shift ;;	# WRITER: S2MPG11 BUCK2S mode on/restore via ACPM (gpurailon.c); implies --gpu-rails
 		--gpu-handover) gpu_handover=1; gpu_rail_on=1; gpu_rails=1; gpu_probe=1; shift ;;	# needs --boot-xnu; WRITER: BUCK2S on BEFORE the jump to XNU and left on (XNU powers the cores itself, docs/research/30)
 		--gpu-rails) gpu_rails=1; gpu_probe=1; shift ;;	# implies --gpu-probe; READ-ONLY S2MPG11 GPU-rail registers via ACPM (gpurails.c)
@@ -162,6 +164,11 @@ if [ "$gpu_s2mpu" = 1 ]; then
 	# Opt-in READ-ONLY dump of the G3D S2MPU registers (gpus2mpu.c); bluejay only, runs right after the read-only probe.
 	[ "$gs101" = 1 ] || { echo "--gpu-s2mpu needs a gs101 board" >&2; exit 2; }
 	CFLAGS="$CFLAGS -DGPU_S2MPU"
+fi
+if [ "$mem_probe" = 1 ]; then
+	# Opt-in READ-ONLY dump of the HSI2 S2MPU (memprobe.c): is UFS DMA filtered above the 4 GiB XNU window (docs/research/44)? gs101 only.
+	[ "$gs101" = 1 ] || { echo "--mem-probe needs a gs101 board" >&2; exit 2; }
+	CFLAGS="$CFLAGS -DMEM_PROBE"
 fi
 if [ "$gpu_rail_on" = 1 ]; then
 	# Opt-in WRITER (BUCK2S mode on before the power cycle, restored afterwards); bluejay only.
@@ -312,6 +319,8 @@ NOJOB_CFLAGS="${CFLAGS//-DGPU_JOB/}"	# the plain / stack gpupower objects never 
 "$CC" $CFLAGS -fno-tree-switch-conversion -fno-jump-tables -c gpuclk.c -o $O/gpuclk.o
 # Same for gpus2mpu.c (read-only S2MPU dump); only LINKED with --gpu-s2mpu (or --gpu-job). Reads only, audited like gpuprobe.o.
 "$CC" $CFLAGS -fno-tree-switch-conversion -fno-jump-tables -c gpus2mpu.c -o $O/gpus2mpu.o
+# Same for memprobe.c (read-only HSI2 S2MPU dump); only LINKED with --mem-probe. Reads only, audited like gpus2mpu.o.
+"$CC" $CFLAGS -fno-tree-switch-conversion -fno-jump-tables -c memprobe.c -o $O/memprobe.o
 # Same for gpujob.c (the stage-2 job writer; only LINKED with --gpu-job) and gpupower_job.o (gpupower.c with the one `gpu_job_run()` hook in the powered window; linked instead of gpupower.o
 # with --gpu-job). Both are audited on every build (writer audit / object audit in tools/test-bluejay-boot.py).
 "$CC" $CFLAGS -fno-tree-switch-conversion -fno-jump-tables -c gpujob.c -o $O/gpujob.o
@@ -365,6 +374,9 @@ fi
 if [ "$gpu_s2mpu" = 1 ]; then
 	usb_objs="$usb_objs $O/gpus2mpu.o"
 fi
+if [ "$mem_probe" = 1 ]; then
+	usb_objs="$usb_objs $O/memprobe.o"
+fi
 if [ "$gpu_rails" = 1 ]; then
 	usb_objs="$usb_objs $O/gpurails.o"
 fi
@@ -384,7 +396,7 @@ fi
 if [ "$touch_rails" = 1 ] || [ "$touch_dvfs" = 1 ] || [ "$gpu_clk" = 1 ] || [ "$gpu_rails" = 1 ] || [ "$wlan_rails" = 1 ]; then
 	usb_objs="$usb_objs $O/acpm.o"
 fi
-abs=$("$READELF" -r $O/shim.o $O/console.o $O/ramlog.o $O/mmu.o $O/fdt.o $O/pstore.o $O/loader.o $O/payload.o $O/ufs.o $O/ufsdiag.o $O/ufsinit.o $O/usbprobe.o $O/usbproto.o $O/usbgadget.o $O/usbpool.o $O/udump.o $O/wlanprobe.o $O/wlanrails.o $O/wlanen.o $O/wlansmc.o $O/wlansmc_iso.o $O/wlansmc_link.o $O/wlanlink.o $O/gpuprobe.o $O/gpupower.o $O/gpupower_stack.o $O/gpupower_job.o $O/gpujob.o $O/gpuclk.o $O/gpus2mpu.o $O/gpurails.o $O/gpurailon.o $O/acpm_railon.o $O/touchprobe.o $O/acpm.o $qr_objs | grep -c ABS64 || true)
+abs=$("$READELF" -r $O/shim.o $O/console.o $O/ramlog.o $O/mmu.o $O/fdt.o $O/pstore.o $O/loader.o $O/payload.o $O/ufs.o $O/ufsdiag.o $O/ufsinit.o $O/usbprobe.o $O/usbproto.o $O/usbgadget.o $O/usbpool.o $O/udump.o $O/wlanprobe.o $O/wlanrails.o $O/wlanen.o $O/wlansmc.o $O/wlansmc_iso.o $O/wlansmc_link.o $O/wlanlink.o $O/gpuprobe.o $O/gpupower.o $O/gpupower_stack.o $O/gpupower_job.o $O/gpujob.o $O/gpuclk.o $O/gpus2mpu.o $O/memprobe.o $O/gpurails.o $O/gpurailon.o $O/acpm_railon.o $O/touchprobe.o $O/acpm.o $qr_objs | grep -c ABS64 || true)
 [ "$abs" = 0 ] || { echo "error: $abs absolute relocations in C objects" >&2; exit 1; }
 "$CC" $CFLAGS -static -T shim.ld -Wl,--build-id=none -Wl,--no-warn-rwx-segments -Wl,-N \
 	$O/start.o $O/shim.o $O/console.o $O/ramlog.o $O/mmu.o $O/fdt.o $O/pstore.o $O/loader.o $O/payload.o $O/ufs.o $O/ufsdiag.o $O/ufsinit.o $O/usbprobe.o $O/usbpool.o $usb_objs $qr_objs -o $O/shim.elf
@@ -475,6 +487,8 @@ else
 	chk "gpuprobe_dump_host_test" $O/gpuprobe_dump_host_test
 	chk "gpus2mpu_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -I. -I$O -include $O/board_config.h -o $O/gpus2mpu_host_test gpus2mpu_host_test.c
 	chk "gpus2mpu_host_test" $O/gpus2mpu_host_test
+	chk "memprobe_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -I. -I$O -include $O/board_config.h -o $O/memprobe_host_test memprobe_host_test.c
+	chk "memprobe_host_test" $O/memprobe_host_test
 	chk "gpujob_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -I. -I$O -include $O/board_config.h -o $O/gpujob_host_test gpus2mpu.c gpujob_host_test.c
 	chk "gpujob_host_test" $O/gpujob_host_test
 	chk "gpupower_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -I. -I$O -include $O/board_config.h -o $O/gpupower_host_test gpupower_host_test.c

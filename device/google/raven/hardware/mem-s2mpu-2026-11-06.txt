@@ -1,0 +1,21 @@
+Pixel 6 Pro (raven), HSI2 S2MPU state at handoff, 2026-11-06. Image shim/out/raven-memprobe1 (--mem-probe, read-only).
+Image sha256 e69444f272cb92aa78743b77ab62775444353fb0502abef985adc4aa211a0e04; built from wip/raven-sec-ts-xnu 7e409e1 plus the uncommitted
+--mem-probe change (shim/memprobe.c, docs/research/44); `fastboot boot` from the bootloader (RAM only). Source: transcribed from a photo of the
+panel (~/git/pixel6/pics IMG_6797, not in git); IMG_6798-6805 are the log replay pages.
+
+Observed on hardware:
+  MEM HSI2 S2MPU 14480000
+  MEM CTRL0 v=00000000          ENABLE (bit 0) = 0: the S2MPU is OFF
+  MEM CTRL1 v=00000003
+  MEM CFG v=00000000
+  MEM FAULT v=00000000          no fault recorded
+  MEM v0/v1 FINFO, FPA = 00000000
+  MEM v0..v7 rw=0000000000000000, l2=0000000000000000, b=00   every L1 attribute of all 8 VIDs x 64 granules read back 0 (no read failed)
+  MEM v0 hi rw=0000 l2=0000     (granules 0x22..0x2B, the 10 GiB high bank)
+  MEM GB 22-2B
+  MEM VERDICT OFF: no DMA filter
+
+Meaning: after ABL the HSI2 S2MPU is disabled, so it filters no DMA from UFS or PCIe (with ENABLE = 0 the L1 tables, here all closed, are not
+consulted; read from source: CTRL0 ENABLE, s2mpu-regs.h:29, and Linux enables it only in its own init, s2mpu-lib.c:352-363). The zero tables
+also show that nothing (ABL included) programmed this S2MPU before handoff. So the S2MPU is not a reason to keep XNU's RAM window at 4 GiB.
+Not shown by this: whether some other agent (TZ / a hypervisor) filters DMA elsewhere; the SSMT stream-id mapping (not read).

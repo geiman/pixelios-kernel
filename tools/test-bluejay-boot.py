@@ -5217,6 +5217,8 @@ def main() -> None:
     check_usb_safety(repo_root / "shim" / "gpuprobe.h")
     check_usb_safety(repo_root / "shim" / "gpus2mpu.c")
     check_usb_safety(repo_root / "shim" / "gpus2mpu.h")
+    check_usb_safety(repo_root / "shim" / "memprobe.c")
+    check_usb_safety(repo_root / "shim" / "memprobe.h")
     usb_safety_selftest()
     usb_object_selftest()
     n_stores = check_usb_object(out_dir / "usbprobe.o")
@@ -5231,6 +5233,9 @@ def main() -> None:
     n_stores = check_usb_object(out_dir / "gpus2mpu.o")
     print(f"PASS gpus2mpu object audit: {n_stores} stores, all stack-based "
           "(same read-only policy as gpuprobe.o: the S2MPU is never written)")
+    n_stores = check_usb_object(out_dir / "memprobe.o")
+    print(f"PASS memprobe object audit: {n_stores} stores, all stack-based "
+          "(same read-only policy as gpus2mpu.o: the HSI2 S2MPU is never written)")
     usbproto_object_selftest()
     n_stores = check_usbproto_object(out_dir / "usbproto.o")
     print(f"PASS usbproto object audit: {n_stores} stores, all stack/arg/"

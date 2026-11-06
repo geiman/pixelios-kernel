@@ -26,6 +26,7 @@
 #include "gpurails.h"
 #include "gpurailon.h"
 #include "gpus2mpu.h"
+#include "memprobe.h"
 #include "gpujob.h"
 #include "touchprobe.h"
 #ifdef BOOT_XNU
@@ -791,6 +792,14 @@ static void __attribute__((noreturn)) bluejay_probe(uintptr_t dtb)
 		}
 	wlan_probe_l2_group(4);			/* SUMMARY, also when gated */
 #endif	/* !(WLAN_ISO_RUN || WLAN_LINK_RUN) */
+	pstore_save();
+#endif
+#ifdef MEM_PROBE
+	/* Opt-in READ-ONLY (--mem-probe, docs/research/44): the HSI2 S2MPU in front of UFS DMA, to decide whether XNU's RAM window may grow past 4 GiB. */
+	delay_ms(3000);
+	con_clear(0xff000000U);
+	con_str("SECTION", "MEM s2mpu");
+	mem_s2mpu_dump();
 	pstore_save();
 #endif
 #ifdef GPU_PROBE
