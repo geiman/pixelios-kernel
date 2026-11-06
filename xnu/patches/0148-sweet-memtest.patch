@@ -1,4 +1,4 @@
-SWEET memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/research/44 step 3): once, sweetmemtestdelay s after UFS is up, allocate up to sweetmemtestgb GiB (default 3) in 32 MiB chunks, never below sweetmemtestfloor GiB free (default 5), count pages per 1 GiB granule, pattern-test every page past the old 4 GiB window through DRAM, and READ one UFS block straight into one page per new granule (ufs_data_pa override, reads only) to compare with the bounce-buffer copy; print per-granule lines and RESULT PASS/FAIL/INCOMPLETE.
+SWEET memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/research/44 step 3): once, sweetmemtestdelay s after UFS is up, allocate up to sweetmemtestgb GiB (default 3) in 32 MiB chunks, never below sweetmemtestfloor GiB free (default 5), count pages per 1 GiB granule, pattern-test every page past the old 4 GiB window through DRAM, and READ one UFS block straight into one page per new granule (ufs_data_pa override, reads only) to compare with the bounce-buffer copy (a timeout of that READ stops UFS for good and keeps every allocation); print per-granule lines and RESULT PASS/FAIL/INCOMPLETE.
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -49,6 +49,7 @@ extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
@@ -9,7 +9,7 @@ SWEET memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/r
  extern void sweet_qr_start(void);
  extern void sweet_sample_start(void);
  extern void sweet_restart_poll(void);   /* bsd/dev/sweet_restart.c */
-@@ -123,6 +124,13 @@ static struct {
+@@ -123,6 +124,19 @@ static struct {
  static LCK_GRP_DECLARE(sweet_ufs_grp, "sweet_ufs");
  static LCK_MTX_DECLARE(sweet_ufs_lock, &sweet_ufs_grp);
  
@@ -19,19 +19,28 @@ SWEET memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/r
 + * for a write (ufs_scsi ignores it when write is set).
 + */
 +static uint64_t ufs_data_pa;
++/*
++ * Set (under sweet_ufs_lock, never cleared) when a READ into ufs_data_pa times out: UTRLCLR alone does not prove the host stopped,
++ * so a late completion could still land in that page or reuse the slot and UCD. From then on ufs_scsi refuses every command and the
++ * memory self-test keeps all its allocations (review raven-mem-1 F1).
++ */
++static bool ufs_fenced;
 +
  static inline uint32_t
  ufs_rd(uint32_t off)
  {
-@@ -162,6 +170,7 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+@@ -162,6 +176,10 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
  	uint64_t ucd_pa = su.dma_pa + DMA_UCD, bounce_pa = su.dma_pa + DMA_BOUNCE;
  
  	assert(len <= BOUNCE_SIZE);
 +	const uint64_t data_pa = (ufs_data_pa && !write && len <= UFS_BLOCK) ? ufs_data_pa : bounce_pa;
++	if (ufs_fenced) {
++		return EIO;
++	}
  	bzero(utrd, sizeof(*utrd));
  	bzero(ucd, sizeof(*ucd));
  
-@@ -188,8 +197,8 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+@@ -188,8 +206,8 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
  		uint32_t n = 0;
  		for (uint32_t done = 0; done < len; done += prdt_chunk, n++) {
  			uint32_t chunk = MIN(prdt_chunk, len - done);
@@ -42,7 +51,18 @@ SWEET memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/r
  			ucd->prdt[n].dbc = chunk - 1;
  		}
  		utrd->prdt = (1024u / gran) << 16 | (su.gs101 ? 16 * n : n);
-@@ -705,6 +714,7 @@ sweet_ufs_init(void)
+@@ -234,6 +252,10 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 			/* gs101 has an inverted UTRLCLR (write the slot mask); standard hosts want ~mask */
+ 			ufs_wr(REG_UTRLCLR, su.gs101 ? slot_bit : ~slot_bit);
+ 			printf("SWEET UFS: command 0x%02x timed out\n", cdb[0]);
++			if (data_pa != bounce_pa) {
++				ufs_fenced = true;
++				printf("SWEET UFS: READ into 0x%llx timed out, UFS stopped for good\n", data_pa);
++			}
+ 			return ETIMEDOUT;
+ 		}
+ 		if (sleepable && now >= spin_until) {
+@@ -705,6 +727,7 @@ sweet_ufs_init(void)
  	sweet_touch_gs101_init();     /* no-op without the ADT node /sweet-touch (bluejay only) */
  	sweet_gpu_gs101_init();       /* no-op without boot-arg sweetgpu= */
  	sweet_wlan_init();            /* no-op without boot-arg sweetwlan= */
@@ -50,7 +70,7 @@ SWEET memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/r
  	return 0;
  }
  
-@@ -1009,4 +1019,167 @@ sweet_ufs_rootdev(dev_t *dev)
+@@ -1009,4 +1032,173 @@ sweet_ufs_rootdev(dev_t *dev)
  	*dev = su.bdev;
  	return 0;
  }
@@ -66,7 +86,8 @@ SWEET memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/r
 + *     read it back (errors are counted);
 + *  3. for one page per such granule, READ the partition's first 4 KiB block twice under the UFS lock (no write can land between):
 + *     into the bounce buffer, then straight into that page (poisoned with 0xA5 first), and compare;
-+ *  4. free everything and print one line per granule and a RESULT line.
++ *  4. free everything and print one line per granule and a RESULT line. If a direct READ timed out (ufs_fenced), UFS is stopped
++ *     and nothing is freed: the host may still own that page.
 + * UFS is only READ. The pages are the test's own allocation: nothing else is written.
 + */
 +extern unsigned long gPhysBase;                 /* osfmk/arm64/arm_vm_init.c:127 */
@@ -183,6 +204,11 @@ SWEET memory self-test (patch 0148, boot-arg sweetmemtest=1, default off; docs/r
 +		printf("SWEET MEM: GB 0x%x pages %u%s tested %u errors %u ufs-dma %s (pa 0x%llx)\n", gb, pages[gb],
 +		    gb < old_end ? " (old window)" : "", tested[gb], errors[gb],
 +		    ufs == -1 ? "-" : ufs == 0 ? "match" : ufs == 1 ? "MISMATCH" : "ERROR", probe[gb]);
++	}
++	/* Reads ufs_fenced without the lock: only ufs_scsi sets it, and every direct READ above ran on this thread. */
++	if (ufs_fenced) {
++		printf("SWEET MEM: RESULT FAIL (a direct UFS READ timed out; UFS stopped, %u x 32 MiB kept allocated)\n", nchunks);
++		return;
 +	}
 +	while (nchunks) {
 +		nchunks--;
