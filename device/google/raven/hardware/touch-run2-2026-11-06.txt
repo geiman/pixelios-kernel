@@ -1,0 +1,28 @@
+Pixel 6 Pro (raven), shim touch probe run 2 (sec_ts / S6SY79x), 2026-11-06. First hardware run of the review-1 and review-2 fixes.
+Image: shim/out/raven-sects3/shim-boot-avb.img, sha256 6616af142288153f7d86dd5e14f73671f9e0e092882973bb13b2ae0ac43e0a5e, built from branch
+wip/raven-sec-ts (on device/raven df8e3eb, changes uncommitted) with `./build.sh --board raven --avb --touch-probe=run,mux,cs,osc,rst,rails`;
+Arm GNU Toolchain 15.2.rel1. Boot: `fastboot boot` (RAM only), slot a. Source: transcribed by eye from photos of the on-screen report
+(~/git/pixel6/pics IMG_6788-6796 = pages 4-9 and earlier pages, not in git); the panel clips long lines at the right edge. Digits may contain
+transcription errors.
+
+Observed on hardware (same as run 1 unless noted):
+  Handoff state (dump): USI11 sysreg mode 0; clk/mosi/miso/cs/reset/irq/mux pads func=0 dat=0; cmu bus_mux [0x600] = 0x10.
+  Rails (ACPM): L25M 0x2c, L26M 0x3c at handoff (enable bit 7 = 0, off). Update: L25M 0x2c -> 0xac, L26M 0x3c -> 0xbc (on), read back.
+  AP/AOC mux: AP NOT driving it low (func=0); mux option drove it low (func=0x1).
+  Clock: sweettouchclk=3 sequence done; osc source 24.576 MHz div 5: usi mux [0x640] 0x10 -> 0, div [0x180c] 0 -> 0x5.
+  USI_CON=0x1 (reset), USI mode now 0x2. SPI regs before init ch=0; after init ch=0xc (CPOL|CPHA, SPI mode 3).
+  diag after setup: USI_CON=0, USI_OPTION=0x3; ch=0xc clk=0 mode=0 cs=0x1; pktcnt=0 pend=0 swap=0 fb=0.
+  Variant F: cs_reg=0 after CS_REG &= ~1 and GPIO low; completed, status=0x1000000 ch=0x2c clk=0 cs=0x1; rx 00 00 00 00 00 (n=8).
+  rst: try 0 event 09 00 10 00 00 00 00 00 -> boot-complete event seen after 0 tries.
+  identify device-id (0x22): rx w0 = 53002200000700aa (same as run 1), w1 = 000000... (clipped); sync=aa echo=22; sec_ts frame ok.
+  identify id (0x52): rx w0 = ac005200000500aa, w1 = 000000000000769... (high digits only, line clipped); frame ok.
+  identify boot-status (0x55): rx w0 = 20005500000300aa; frame ok; boot status 0x20 = app (firmware running).
+  identify: 3/3 sec_ts frames ok -> S6SY79x answers. phase 1 result: chip answered.
+  SWEET TOUCH RESULT: opts=0x1a7 mux=driven-low clk=applied ... id=sec-ts-ok-app moved=F,R,I
+  No VARIANT A-E lines: the first identify answered, so the fallback did not run (it is covered only by the host test).
+  PROBE complete; replaying log. Last PSTORE saved bytes=22179 zone=0xFD3FF000.
+
+Notes:
+  - Result identical to run 1 (hardware/touch-run1-2026-11-05.txt): the review fixes (bounded delay_us, 8-byte read contract, mode 3 kept in
+    spi_engine_init, protocol checks) do not change the working path.
+  - The identify data is still clipped at the panel's right edge.

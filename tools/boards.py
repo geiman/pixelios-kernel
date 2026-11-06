@@ -80,8 +80,21 @@ def _touch_macros(v):
     d("USI_MODE_SPI", v["usi_mode_spi"])
     d("USI_MODE_MASK", v["usi_mode_mask"])
     d("SPI_FUNC", v["touch_spi_pin_func"])
-    d("CHIP_ID0", v["touch_chip_id"][0])
-    d("CHIP_ID1", v["touch_chip_id"][1])
+    # touch_protocol picks the shim's identify sequence. FTM5 (bluejay) has a fixed chip id in its DT; sec_ts (raven's
+    # S6SY79x) has none, and validates the reply frame instead. A sec_ts board must not carry touch_chip_id: that key also
+    # makes tools/mkadt.py emit /sweet-touch, which starts the FTM5-only XNU driver (patches 0088-0095).
+    proto = v.get("touch_protocol", "ftm5")
+    if not isinstance(proto, str) or proto not in ("ftm5", "sec_ts"):
+        raise ValueError(f"touch_protocol = {proto!r}: must be 'ftm5' or 'sec_ts'")
+    if proto == "sec_ts":
+        if "touch_chip_id" in v:
+            raise ValueError("touch_protocol sec_ts with touch_chip_id: the FTM5 XNU driver would probe a sec_ts chip")
+        out.append("#define TOUCH_PROTO_SEC_TS 1")
+    else:
+        if "touch_chip_id" not in v:
+            raise ValueError("touch_protocol ftm5 needs touch_chip_id")
+        d("CHIP_ID0", v["touch_chip_id"][0])
+        d("CHIP_ID1", v["touch_chip_id"][1])
     for pin in ("clk", "mosi", "miso", "cs", "irq", "reset", "mux"):
         bank, idx = v[f"touch_pin_{pin}"]
         d(f"PIN_{pin.upper()}_BANK", v[f"{bank}_bank"])
@@ -392,7 +405,8 @@ def c_header(board: str) -> str:
             raise ValueError("gpu.fvmap_sram must be acpm.sram_base + 0x31000 (gs101.dtsi fvmap_addr, docs/research/25)")
     for key, addr in sorted(values.get("gpu", {}).items()):
         lines.append(f"#define GPU_{key.upper()} {int(addr, 0):#x}UL")
-    if "touch_chip_id" in values:
+    # any touch key reaches the validator: a misspelled or mistyped touch_protocol must fail the build, not drop the macros
+    if "touch_chip_id" in values or "touch_protocol" in values:
         lines += _touch_macros(values)
     if "acpm" in values:
         lines += _acpm_macros(values)

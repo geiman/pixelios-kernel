@@ -479,14 +479,26 @@ build-time (the shim builds in seconds); an unknown word, `osc` with `top`, or o
   the irq pad, the mux pad's pull, SPI STATUS/RX_DATA, USI wrapper words other than CON/OPTION. `tools/test-bluejay-boot.py` audits the
   source (no asm, no volatile, no pointer casts, `if (!w32_allowed(...)) return` before the write, allowlist depends on the address) and
   the object (stores only stack/argument based, `try_write32` only in `w32`), with mutation self-tests.
-  All polls have a time limit and a poll budget; the fixed delays (a few us, the 10 ms reset pulse, 5 ms between ready polls) use
-  `wait_ticks()` and so are not protected against a dead counter.
+  All polls have a time limit and a poll budget. The fixed delays (`delay_us()`: a few us, the 10 ms reset pulse, the gaps between ready polls):
+  in a **sec_ts** build they spin on the counter with a read budget of 1000 reads per us + 1000, so a dead counter ends them too (review of the
+  sec_ts change, finding 1; host test `test_dead_counter`), but they do not pump a `--usb-gadget` log meanwhile; in an **FTM5** build they still use
+  `wait_ticks()` (pumps the USB log, not protected against a dead counter), as do the ACPM rails/DVFS steps.
 - Output: the XNU driver's own lines (`SWEET TOUCH: cmu base ...`, `pin clk ...`, `VARIANT F: ...`, `identify: ...`), label `SWEET` + text
   `TOUCH: ...`, so `grep 'SWEET TOUCH:'` of the RAM/USB log feeds the same parser as the XNU log; lines over the 96-byte RAM-log line are
   split at spaces with key=value tokens whole. The UART copy reads `SWEET: TOUCH: ...`. The last line is
   `SWEET TOUCH RESULT: opts=0x.. mux=.. clk=.. F=.. loop=.. rst=.. id=.. moved=F,L,R,I` (F variant F, L loopback, R reset FIFO read,
   I identify; `moved=-` means nothing moved; `id=chip-id-ok` is the FTM5 id).
 - Status: *observed on hardware* (run touch1, 2026-10-22: identify `36 48 03 00` with rails on); the recipe is in XNU patch 0095 and boot-arg `sweettouchcs=1`.
+- **sec_ts boards** (board.json `touch_protocol: "sec_ts"`, raven's S6SY79x; *read from source*: google-modules/touch/sec_touch b23d1f8dfb9e, cites in
+  `touchprobe.h`). Same options and write allowlist; what changes: CH_CFG gets CPOL|CPHA (SPI mode 3) after the setup; each read is sec_ts's two
+  chip selects (request `AA 00 01 len_hi len_lo reg cksum 00`, ~100 us, then a 7-byte header + data + checksum); `rst` waits 80 ms after the reset
+  pulse and polls READ_ONE_EVENT (0x60) up to 100 times 20 ms apart for the boot-complete event; the identify reads DEVICE_ID (0x22, 5 B), ID (0x52, 3 B)
+  and BOOT_STATUS (0x55, 1 B; reads over 8 data bytes are refused unsent, `TP_SEC_MAX_LEN`), each printed as `identify <what>: rx ...` + `sync= echo= st= data= -> sec_ts frame ok | bad frame | no answer, MISO high/low`.
+  A frame counts only if sync 0xAA, register echo and checksum match (sec_ts's own test). Result `id=sec-ts-ok-app` (3/3 frames, firmware running),
+  `sec-ts-ok-boot` (bootloader mode), `sec-ts-partial`, `rx-no-chip` (transfers moved, no good frame) or `stall`. Raven build (bluejay's recipe):
+  `./build.sh --board raven --avb --touch-probe=run,mux,cs,osc,rst,rails`. Host test `shim/sectouch_host_test.c` (fake chip; run for every touch board).
+  Status: *observed on hardware* (raven run touch-run1, 2026-11-05, image sha256 3eb3035261b2806d: `id=sec-ts-ok-app`, 3/3 frames, boot-complete on the
+  first poll; `device/google/raven/hardware/touch-run1-2026-11-05.txt`).
 
 ## tools/phone-lock: one lock for the one phone (TP-016)
 

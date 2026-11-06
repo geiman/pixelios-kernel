@@ -292,10 +292,30 @@ static uint64_t us(void)
 	return f ? touch_ticks() * 1000000ull / f : 0;
 }
 
+#ifdef TOUCH_PROTO_SEC_TS
+/* sec_ts: a fixed delay that ends even if the counter is dead (shim rule: every wait is counter-bounded): it spins on us() but
+ * gives up after u * TP_DELAY_POLLS_PER_US + 1000 reads. One iteration (an mrs of CNTPCT, a 64-bit multiply and divide, a
+ * compare) takes well over 1 ns, so with a live counter the time limit always ends the loop first (guess from instruction
+ * counts, not measured); a stopped counter, or counter_freq() 0, ends it after the read budget instead. Unlike wait_ticks() it
+ * does not call con_service(), so a --usb-gadget log is not pumped during the delays (at most ~2.2 s per run); calling it
+ * would widen touchprobe.o's audited symbol set. The FTM5 build keeps wait_ticks() unchanged (as reviewed). */
+#ifndef TP_DELAY_POLLS_PER_US
+#define TP_DELAY_POLLS_PER_US	1000u
+#endif
+static void delay_us(unsigned u)
+{
+	uint64_t t0 = us();
+	unsigned long long n = 0, cap = (unsigned long long)u * TP_DELAY_POLLS_PER_US + 1000u;
+
+	while (us() - t0 < u && ++n < cap) {
+	}
+}
+#else
 static void delay_us(unsigned u)
 {
 	wait_ticks(counter_freq() * u / 1000000u);
 }
+#endif
 
 /* true once lim_us elapsed since t0 or the poll budget is spent */
 static int expired(uint64_t t0, unsigned lim_us, unsigned *polls)
@@ -616,7 +636,7 @@ static void spi_engine_init(struct tp *t)
 	wr(t, SPI + TP_SPI_PENDING_CLR, TP_PND_ERR_CLR);
 	wr(t, SPI + TP_SPI_PENDING_CLR, 0);
 	wr(t, SPI + TP_SPI_SWAP_CFG, 0);
-	wr(t, SPI + TP_SPI_CH_CFG, 0);	/* CPOL = 0, CPHA = 0, master */
+	wr(t, SPI + TP_SPI_CH_CFG, TP_CH_MODE);	/* master; CPOL/CPHA 0 for FTM5, mode 3 for sec_ts (variants re-run this) */
 	wr(t, SPI + TP_SPI_FB_CLK, 1);	/* samsung,spi-feedback-delay = <1> */
 	spi_flush(t);
 }
@@ -652,6 +672,10 @@ static void spi_setup(struct tp *t)
 	} else {
 		spi_engine_init(t);
 	}
+#ifdef TOUCH_PROTO_SEC_TS
+	/* spi-cpol + spi-cpha (raven DT): CH_CFG CPOL_L | CPHA_B, slave bit clear, as s3c64xx_spi_config (spi-s3c64xx.c:779-790) */
+	wr(t, SPI + TP_SPI_CH_CFG, (rd(t, SPI + TP_SPI_CH_CFG) & ~TP_CH_SLAVE) | TP_CH_CPOL_L | TP_CH_CPHA_B);
+#endif
 	say("SPI regs after init:  ch=%#x clk=%#x mode=%#x status=%#x fb=%#x (the actual SCK = CMU ipclk / 4)",
 	    rd(t, SPI + TP_SPI_CH_CFG), rd(t, SPI + TP_SPI_CLK_CFG), rd(t, SPI + TP_SPI_MODE_CFG),
 	    rd(t, SPI + TP_SPI_STATUS), rd(t, SPI + TP_SPI_FB_CLK));
@@ -770,6 +794,7 @@ static int burst(struct tp *t, const uint8_t *tx, uint64_t *rx, unsigned len)
 	return (t->opts & TP_O_CS) ? abl_burst(t, tx, rx, len) : spi_burst(t, tx, rx, len, 0);
 }
 
+#ifndef TOUCH_PROTO_SEC_TS
 /* The FTM5 transaction shape (0088 tg_xfer + tg_read): cmd bytes, then the reply stream (1 dummy byte + n bytes, n <= 15)
  * in one chip select, as bursts of <= 8 bytes: reply byte k is in bits 8k.. of *w0 (k < 8) or of *w1 (k >= 8). */
 static int xfer_rd(struct tp *t, const uint8_t *cmd, unsigned ncmd, uint64_t *w0, uint64_t *w1, unsigned n)
@@ -788,12 +813,52 @@ static int xfer_rd(struct tp *t, const uint8_t *cmd, unsigned ncmd, uint64_t *w0
 	cs_end(t);
 	return err;
 }
+#endif
 
 /* byte k (0 = the dummy byte) of the reply stream */
 static unsigned rbyte(uint64_t w0, uint64_t w1, unsigned k)
 {
-	return (unsigned)(((k < 8u ? w0 : w1) >> (8u * (k & 7u))) & 0xffu);
+	return tp_byte(w0, w1, k);
 }
+
+#ifdef TOUCH_PROTO_SEC_TS
+#define TP_ID_CMD_LEN	TP_SEC_REQ_LEN
+
+/* the sec_ts READ_DEVICE_ID request frame: what variant F and the loopback send */
+static void id_cmd(uint8_t *cmd)
+{
+	tp_sec_req(cmd, TP_SEC_READ_DEVICE_ID, 5u);
+}
+
+/* sec_ts_read_internal (sec_ts.c:357-472) over SPI: the request frame in one chip select, ~100 us, then the reply in a
+ * second chip select (two spi_sync messages). Reply bytes 0..7 land in *w0, 8..15 in *w1. 0, -1 = SPI timeout,
+ * -2 = the frame failed sec_ts's own check (sync, register echo, checksum), -3 = len > TP_SEC_MAX_LEN (nothing sent). */
+static int sec_read(struct tp *t, unsigned reg, unsigned len, uint64_t *w0, uint64_t *w1)
+{
+	uint8_t req[TP_SEC_REQ_LEN];
+	unsigned n = tp_sec_reply_len(len);
+	int err;
+
+	if (len > TP_SEC_MAX_LEN || n > 16u)
+		return -3;	/* caller error: nothing sent (touchprobe.h TP_SEC_MAX_LEN) */
+	tp_sec_req(req, reg, len);
+	cs_begin(t);
+	err = burst(t, req, 0, TP_SEC_REQ_LEN);
+	cs_end(t);
+	if (err)
+		return -1;
+	delay_us(TP_SEC_RD_DELAY_US);
+	cs_begin(t);
+	err = burst(t, 0, w0, n > 8u ? 8u : n);
+	if (!err && n > 8u)
+		err = burst(t, 0, w1, n - 8u);
+	cs_end(t);
+	if (err)
+		return -1;
+	return tp_sec_reply_ok(*w0, *w1, reg, len) ? 0 : -2;
+}
+#else
+#define TP_ID_CMD_LEN	5u
 
 /* ftm5_hwreg_read_cmd: opcode + big-endian register address */
 static void id_cmd(uint8_t *cmd)
@@ -804,6 +869,7 @@ static void id_cmd(uint8_t *cmd)
 	cmd[3] = (uint8_t)(TP_FTM5_ADDR_DCHIP_ID >> 8);
 	cmd[4] = (uint8_t)TP_FTM5_ADDR_DCHIP_ID;
 }
+#endif
 
 /* What the experiments saw, for the final TOUCH RESULT line. 0 = not run, 1 = no data (stall), 2 = data moved. */
 struct res {
@@ -815,6 +881,63 @@ struct res {
 	unsigned idb0, idb1;
 };
 
+#ifdef TOUCH_PROTO_SEC_TS
+/* One sec_ts read, printed whole: the 16 reply bytes, frame verdict, data bytes. Returns sec_read's code (0 = good frame). */
+static int sec_report(struct tp *t, const char *what, unsigned reg, unsigned len, uint64_t *w0, uint64_t *w1)
+{
+	int e;
+
+	*w0 = 0;
+	*w1 = 0;
+	t->last_st = t->last_ch = 0;
+	e = sec_read(t, reg, len, w0, w1);
+	if (e == -3) {
+		say("identify %s: length %u over the probe's %u-byte limit, not sent", what, len, TP_SEC_MAX_LEN);
+		return e;
+	}
+	if (e == -1) {
+		say("identify %s: SPI transfer timed out, status=%#x ch=%#x (at timeout: status=%#x ch=%#x)", what,
+		    rd(t, SPI + TP_SPI_STATUS), rd(t, SPI + TP_SPI_CH_CFG), t->last_st, t->last_ch);
+		return e;
+	}
+	say("identify %s: rx %016llx %016llx (bytes little-endian per word)", what, (unsigned long long)*w0,
+	    (unsigned long long)*w1);
+	say("identify %s reg %#x: sync=%02x echo=%02x st=%02x data=%02x %02x %02x %02x %02x -> %s", what, reg,
+	    tp_byte(*w0, *w1, 0), tp_byte(*w0, *w1, 5), tp_byte(*w0, *w1, 6), tp_byte(*w0, *w1, 7),
+	    len > 1 ? tp_byte(*w0, *w1, 8) : 0u, len > 2 ? tp_byte(*w0, *w1, 9) : 0u, len > 3 ? tp_byte(*w0, *w1, 10) : 0u,
+	    len > 4 ? tp_byte(*w0, *w1, 11) : 0u,
+	    !e ? "sec_ts frame ok" : (*w0 == ~0ull && *w1 == ~0ull) ? "no answer, MISO high (rails off, in reset, or bus not ours?)" :
+	    (*w0 == 0 && *w1 == 0) ? "no answer, MISO low (rails off, in reset, or bus not ours?)" : "bad frame");
+	return e;
+}
+
+/* sec_ts_fw_init / sec_ts_read_information order: DEVICE_ID (5), ID (3), BOOT_STATUS (1). The chip "answers" when all
+ * three frames pass sec_ts's own check; r->idb0 = good frames, r->idb1 = the boot status byte. */
+static int identify(struct tp *t, struct res *r)
+{
+	uint64_t w0, w1;
+	unsigned good = 0;
+	int e;
+
+	r->idb1 = 0x100u;	/* no boot status read */
+	e = sec_report(t, "device-id", TP_SEC_READ_DEVICE_ID, 5u, &w0, &w1);
+	r->id = (e == 0 || e == -2) ? 2 : 1;	/* 2 = the transfer completed (data moved), whatever the frame said */
+	if (r->id != 2)
+		return 0;
+	good += e == 0;
+	if (!t->fault && sec_report(t, "id", TP_SEC_READ_ID, 3u, &w0, &w1) == 0)
+		good++;
+	if (!t->fault && sec_report(t, "boot-status", TP_SEC_READ_BOOT_STATUS, 1u, &w0, &w1) == 0) {
+		good++;
+		r->idb1 = tp_byte(w0, w1, TP_SEC_RD_HDR);
+		say("identify: boot status %#x = %s", r->idb1, r->idb1 == TP_SEC_STATUS_APP ? "app (firmware running)" :
+		    r->idb1 == TP_SEC_STATUS_BOOT ? "boot (bootloader: firmware missing or bad)" : "unknown");
+	}
+	r->idb0 = good;
+	say("identify: %u/3 sec_ts frames ok -> %s", good, good == 3 ? "S6SY79x answers" : good ? "partial" : "no answer");
+	return good == 3;
+}
+#else
 /* 0088 tg_identify */
 static int identify(struct tp *t, struct res *r)
 {
@@ -848,11 +971,12 @@ static int identify(struct tp *t, struct res *r)
 	    "unexpected value");
 	return match != 0;
 }
+#endif
 
 /* 0090 tg_variant: A..E; returns 1 when the 5-byte burst completed. */
 static int variant(struct tp *t, unsigned n)
 {
-	uint8_t cmd[5];
+	uint8_t cmd[TP_ID_CMD_LEN];
 	uint32_t v;
 	int err;
 
@@ -914,7 +1038,7 @@ static void say_rx(const char *what, uint64_t w, unsigned n)
 /* X1, variant F: ABL-exact manual chip select. The setup already skipped MODE_CFG / INT_EN / SWAP_CFG (spi_setup, cs). */
 static void exp_variant_f(struct tp *t, struct res *r)
 {
-	uint8_t cmd[5];
+	uint8_t cmd[TP_ID_CMD_LEN];
 	uint64_t rx = 0;
 	int err;
 
@@ -935,7 +1059,7 @@ static void exp_variant_f(struct tp *t, struct res *r)
 /* X3: self-loopback (MODE_CFG bit 3) with FB_CLK 0 and 1; the RX bytes must equal the TX bytes. */
 static void exp_loop(struct tp *t, struct sv *s, struct res *r)
 {
-	uint8_t tx[5];
+	uint8_t tx[TP_ID_CMD_LEN];
 	unsigned pass, i;
 
 	id_cmd(tx);
@@ -988,6 +1112,39 @@ static void exp_rst(struct tp *t, struct sv *s, struct res *r)
 	delay_us(10000);
 	pin_put(t, PIN(RESET), 1);
 	r->rst = 1;
+#ifdef TOUCH_PROTO_SEC_TS
+	/* sec_ts_probe: reset high, ~80 ms, then sec_ts_wait_for_ready(SEC_TS_ACK_BOOT_COMPLETE): READ_ONE_EVENT up to 100 times,
+	 * 20 ms apart (sec_ts.c:4726-4743, 1089-1113). A bad frame is a try that did not count, as in sec_ts. */
+	(void)cmd;
+	(void)rounds;
+	delay_us(TP_SEC_BOOT_DELAY_US);
+	t0 = us();
+	for (i = 0; i < TP_SEC_READY_TRIES && !t->fault && !expired(t0, TP_SEC_READY_TRIES * TP_SEC_READY_POLL_US + 500000u, &polls); i++) {
+		uint64_t w0 = 0, w1 = 0;
+		int e = sec_read(t, TP_SEC_READ_ONE_EVENT, TP_SEC_EVENT_SIZE, &w0, &w1);
+		unsigned e0 = rbyte(w0, w1, TP_SEC_RD_HDR), e1 = rbyte(w0, w1, TP_SEC_RD_HDR + 1);
+
+		if (e == -1 || e == -3) {
+			say("rst: event read %s", e == -1 ? "timed out" : "refused (length)");
+			break;
+		}
+		if (e == 0) {
+			r->rst = 2;
+			if (logged++ < 8u)	/* the RAM log is small: first 8 only */
+				say("rst: try %u event %02x %02x %02x %02x %02x %02x %02x %02x", i, e0, e1,
+				    rbyte(w0, w1, 9), rbyte(w0, w1, 10), rbyte(w0, w1, 11), rbyte(w0, w1, 12),
+				    rbyte(w0, w1, 13), rbyte(w0, w1, 14));
+			if (tp_sec_boot_complete(e0, e1)) {
+				r->ready = 1;
+				break;
+			}
+		} else if (i == 0 || i == TP_SEC_READY_TRIES - 1u) {
+			say("rst: try %u bad frame %016llx %016llx", i, (unsigned long long)w0, (unsigned long long)w1);
+		}
+		delay_us(TP_SEC_READY_POLL_US);
+	}
+	say("rst: %s after %u tries", r->ready ? "boot-complete event seen" : "no boot-complete event", i);
+#else
 	t0 = us();
 	while (!t->fault && rounds++ < 400u && !expired(t0, 1500000u, &polls)) {
 		uint64_t w0 = 0, w1 = 0;
@@ -1015,6 +1172,7 @@ static void exp_rst(struct tp *t, struct sv *s, struct res *r)
 		delay_us(5000);
 	}
 	say("rst: %s", r->ready ? "controller-ready event seen" : "no controller-ready event");
+#endif
 }
 
 static void pud_restore(struct tp *t, struct sv *s)
@@ -1060,8 +1218,14 @@ static void summary(const struct res *r, unsigned opts)
 		mv[0] = '-', mv[1] = 0;
 	const char *loop = r->loop == 0 ? "na" : r->loop == 1 ? "stall" : r->loop_match == 3 ? "rx==tx" :
 			   r->loop_match == 1 ? "fb0-only" : r->loop_match == 2 ? "fb1-only" : "rx!=tx";
+#ifdef TOUCH_PROTO_SEC_TS
+	/* sec-ts-ok = all three identify frames passed sec_ts's check; the boot status says whether its firmware runs */
+	const char *id = r->id == 2 ? (r->idb0 == 3u ? (r->idb1 == TP_SEC_STATUS_APP ? "sec-ts-ok-app" : r->idb1 == TP_SEC_STATUS_BOOT ?
+			 "sec-ts-ok-boot" : "sec-ts-ok") : r->idb0 ? "sec-ts-partial" : "rx-no-chip") : stage(r->id, "na", "stall", "");
+#else
 	const char *id = r->id == 2 ? (r->idb0 == TOUCH_CHIP_ID0 && r->idb1 == TOUCH_CHIP_ID1 ? "chip-id-ok" : "rx-no-chip") :
 			 stage(r->id, "na", "stall", "");
+#endif
 
 	/* moved: F = variant F, L = loopback, R = reset FIFO read, I = identify (docs/AUTOMATION.md) */
 	say_result("opts=%#x mux=%s clk=%s F=%s loop=%s rst=%s id=%s moved=%s", opts, mux, stage(r->clk, "na", "failed", "applied"),

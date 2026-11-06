@@ -513,8 +513,16 @@ else
 	chk "gpurailon_gate_u_host_test" $O/gpurailon_gate_u_host_test
 	chk "gpurailon_null_host_test (compile)" $GRO -DNULL_TEST -I$O -include $O/board_config_n0.h -o $O/gpurailon_null_host_test gpurailon_host_test.c
 	chk "gpurailon_null_host_test" $O/gpurailon_null_host_test
-	chk "touch_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -I. -I$O -include $O/board_config.h -o $O/touch_host_test touch_host_test.c
-	chk "touch_host_test" $O/touch_host_test
+	# touchprobe.c has two identify protocols (board.json touch_protocol): FTM5 (touch_chip_id, bluejay) and sec_ts (raven).
+	# touch_host_test is the FTM5 one and needs the chip id; sectouch_host_test runs on every touch board, against a sec_ts
+	# copy of the board header, so a bluejay gate also exercises the raven path.
+	if grep -q '^#define TOUCH_CHIP_ID0 ' $O/board_config.h; then
+		chk "touch_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -I. -I$O -include $O/board_config.h -o $O/touch_host_test touch_host_test.c
+		chk "touch_host_test" $O/touch_host_test
+	fi
+	{ grep -v '^#define TOUCH_CHIP_ID[01] \|^#define TOUCH_PROTO_SEC_TS ' $O/board_config.h; echo '#define TOUCH_PROTO_SEC_TS 1'; } > $O/board_config_sec.h
+	chk "sectouch_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -I. -I$O -include $O/board_config_sec.h -o $O/sectouch_host_test sectouch_host_test.c
+	chk "sectouch_host_test" $O/sectouch_host_test
 	chk "acpm_host_test (compile)" gcc -O1 -Wall -Wextra -Werror -DTOUCH_RAILS_WRITE -I. -I$O -include $O/board_config.h -o $O/acpm_host_test acpm_host_test.c
 	chk "acpm_host_test" $O/acpm_host_test
 	for v in 0 1; do chk "rails_host_test$v (compile)" gcc -O1 -Wall -Wextra -Werror -DRT_VERIFIED=$v -I. -I$O -include $O/board_config.h -o $O/rails_host_test$v rails_host_test.c; chk "rails_host_test$v" $O/rails_host_test$v; done

@@ -1,0 +1,27 @@
+Pixel 6 Pro (raven), shim touch probe run 1 (sec_ts / S6SY79x), 2026-11-05.
+Image: shim/out/raven-sects1/shim-boot-avb.img, sha256 3eb3035261b2806d..., built from branch wip/raven-sec-ts (on device/raven df8e3eb, changes
+uncommitted at the time) with `./build.sh --board raven --avb --touch-probe=run,mux,cs,osc,rst,rails`; Arm GNU Toolchain 15.2.rel1; bootloader slider-1.3-11170084.
+Boot: `fastboot boot` (RAM only). Source: transcribed by eye from photos of the on-screen report (~/git/pixel6/pics IMG_6772-6782, not in git);
+the panel clips each line at its right edge, so long lines are partial. Digits may contain transcription errors.
+
+Observed on hardware:
+  Handoff state (dump): USI11 sysreg mode 0 (not SPI); clk/mosi/miso/cs/reset/mux pads func=0 dat=0; cmu usi mux [0x640] = 0x10.
+  Rails (ACPM): L25M = 0x2c, L26M = 0x3c, both enable bit 7 = 0 (OFF) at handoff, as on bluejay. Update: L25M 0x2c -> 0xac, L26M 0x3c -> 0xbc (on).
+  AP/AOC mux gpp26-1 (ap2aoc): the AP was NOT driving it low; the mux option drove it low (func=0x1).
+  Clock: sweettouchclk=3 sequence done; osc source: usi mux 0x10 -> 0, div 0 -> 5.
+  SPI after setup: ch=0xc (CPOL|CPHA, SPI mode 3), USI_CON 0, USI_OPTION 0x3.
+  Variant F (ABL transfer, before the reset pulse): completed, rx 00 00 00 00 00.
+  rst: reset pulse, 80 ms, then READ_ONE_EVENT: try 0 event 09 00 10 00 00 00 00 00 -> boot-complete event seen after 0 tries
+       (0x09: bits 5:2 = 2 = TYPE_STATUS_EVENT_INFO; byte 1 = 0x00 = SEC_TS_ACK_BOOT_COMPLETE).
+  identify DEVICE_ID (0x22): rx w0 = 53002200000700aa -> bytes aa 00 07 00 00 22 00 53: sync aa, echo 22, st 00, data[0] = 0x53; frame ok
+       (data[1..4] were in the clipped part of the line).
+  identify ID (0x52):        rx w0 = ac005200000500aa -> aa 00 05 00 00 52 00 ac: data[0] = 0xac; w1 partially visible (...07); frame ok.
+  identify BOOT_STATUS (0x55): rx w0 = 20005500000300aa -> aa 00 03 00 00 55 00 20: boot status 0x20 = SEC_TS_STATUS_APP_MODE; frame ok.
+  identify: 3/3 sec_ts frames ok -> S6SY79x answers. phase 1 result: chip answered.
+  SWEET TOUCH RESULT: opts=0x1a7 mux=driven-low clk=applied ... id=sec-ts-ok-app moved=F,R,I
+
+Notes:
+  - Reply header byte 2 = data length + 2 in all three replies (07/05/03 for 5/3/1 bytes); bytes 1, 3, 4 = 0. sec_ts_read_internal checks only
+    bytes 0, 5 and the checksum (sec_ts.c:428-435), so this is an observation, not something the probe relies on.
+  - Milestone 1 (read the chip over SPI11) reached with the bluejay recipe (rails + mux + osc + ABL transfer + reset) plus SPI mode 3.
+  - Next for a fuller record: print the identify data on its own short lines so the panel does not clip DEVICE_ID[1..4] and ID[1..2].
