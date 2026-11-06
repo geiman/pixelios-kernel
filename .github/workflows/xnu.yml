@@ -16,6 +16,9 @@ on:
       machine_config:
         description: xnu MACHINE_CONFIG
         default: SWEET
+      runner:
+        description: macOS runner label (macos-15-intel, or macos-15 = arm64 when its queue is short)
+        default: macos-15-intel
   push:
     branches: [main]
     paths:
@@ -44,8 +47,12 @@ jobs:
           python3 tools/qr-log.py --selftest
 
   kernel:
-    # macos-14 ships Xcode 15, whose iig matches the xnu-8796 IORPC ABI (Xcode 16's does not)
-    runs-on: macos-14
+    # GitHub retired the macos-14 runners (Xcode 15) on 2026-11-02 (actions/runner-images#15226). Xcode 16.0 is the oldest
+    # Xcode on macos-15; its iig is the same DriverKit-286 as Xcode 15.4's and generates byte-identical output for this tree
+    # (observed 2026-11-06: all 17 *.iig.cpp equal apart from the banner date, all 17 headers equal). Later Xcode 16.x / 26 may
+    # ship a newer iig, so Xcode 16.0 is pinned and the "iig version" step below fails the job if the generator changes.
+    # macos-15 arm64 jobs went unacquired twice on 2026-11-06, so the default runner is the Intel image.
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +72,7 @@ jobs:
           # build.sh only checks that `xcodes` exists; Xcode is preinstalled on the runner
           printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
           sudo chmod +x /usr/local/bin/xcodes
-          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          XC=/Applications/Xcode_16.0.app
           echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XC"
           xcodebuild -version
@@ -73,6 +80,15 @@ jobs:
       - name: Build
         working-directory: dxb
         run: bash build.sh
+
+      - name: iig version
+        # every generated DriverKit implementation must come from the DriverKit-286 iig (the one Xcode 15.x shipped)
+        run: |
+          set -e
+          ls dxb/build/xnu.obj/*/iokit/DriverKit/*.iig.cpp > /dev/null
+          bad=$(grep -L '^/\* iig(DriverKit-286 ' dxb/build/xnu.obj/*/iokit/DriverKit/*.iig.cpp || true)
+          head -1 dxb/build/xnu.obj/*/iokit/DriverKit/OSObject.iig.cpp
+          [ -z "$bad" ] || { echo "iig is not DriverKit-286: $bad"; exit 1; }
 
       - name: Collect
         if: always()
