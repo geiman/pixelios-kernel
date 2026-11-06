@@ -40,6 +40,7 @@ MUTANTS = [
 # sweet_mali.c: the exact statements sweet_mali_map() must contain (source pins), and mutants each pin must catch
 MFLAGS = "const uint32_t mflags = (flags & SWEET_MALI_EXEC) ? MALI_F_EXEC : 0;"
 CALL = "int ae = mali_va_alloc_map(&sm.va, n * 4u, mflags, &va);"
+LOCK = "lck_mtx_lock(&sm_lock);"
 SRC_MUTANTS = [
     ("flags translated to 0", [(MFLAGS, "const uint32_t mflags = 0;")]),
     ("call passes 0 instead of mflags", [(CALL, "int ae = mali_va_alloc_map(&sm.va, n * 4u, 0, &va);")]),
@@ -49,6 +50,10 @@ SRC_MUTANTS = [
     ("lock kept on failure", [("if (ae != 0) {\n\t\tlck_mtx_unlock(&sm_lock);", "if (ae != 0) {\n\t\t;")]),
     ("page entries ignore mflags", [("pa16k[i] + 0x1000ull * k, mflags);", "pa16k[i] + 0x1000ull * k, 0);")]),
     ("translation after the call", [(MFLAGS + "\n", ""), (CALL, CALL + "\n\t" + MFLAGS)]),
+    # review 2 F1: the failure branch unlocks, so the call must run with sm_lock held
+    ("call moved above the lock", [(CALL + "\n", ""), (LOCK, CALL + "\n\t" + LOCK)]),
+    ("lock removed", [("\t" + LOCK + "\n", "\n")]),
+    ("lock dropped before the call", [(CALL, "lck_mtx_unlock(&sm_lock);\n\t" + CALL)]),
 ]
 
 
@@ -119,6 +124,13 @@ def pin_errors(text):
         errs.append("VA chosen outside mali_va_alloc_map")
     if MFLAGS in b and CALL in b and b.index(MFLAGS) > b.index(CALL):
         errs.append("translation after the call")
+    # review 2 F1: exactly one lock in the body, before the call, and nothing releases it in between
+    if b.count(LOCK) != 1:
+        errs.append("sm_lock not taken exactly once")
+    elif CALL in b:
+        lk, cl = b.index(LOCK), b.index(CALL)
+        if lk > cl or "lck_mtx_unlock(" in b[lk:cl]:
+            errs.append("mali_va_alloc_map not called with sm_lock held")
     if not re.search(r"if \(ae != 0\) \{\n\t\tlck_mtx_unlock\(&sm_lock\);\n\t\tif \(ae == -1\) \{\n\t\t\tprintf\([^;]*\);\n\t\t\treturn EINVAL;\n\t\t\}\n\t\treturn ENOMEM;\n\t\}", b):
         errs.append("failure branch not: unlock, -1 -> EINVAL, else ENOMEM")
     maps = re.findall(r"mali_pt_map\(&sm\.pt,[^;]*;", b)
