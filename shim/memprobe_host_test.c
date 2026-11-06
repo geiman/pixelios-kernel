@@ -4,7 +4,15 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+/* Apple clang does not know gcc's noipa (kept literal in memprobe.c, as in gpus2mpu.c); -Werror would stop the host test (same as wlansmc_host_test.c). */
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunknown-attributes"
+#endif
 #include "memprobe.c"
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 #if !(SOC_GS101 && defined(MEM_S2MPU_HSI2))
 #error "needs a gs101 board_config.h with the mem block"
