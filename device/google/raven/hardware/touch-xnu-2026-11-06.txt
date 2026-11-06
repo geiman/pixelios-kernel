@@ -1,0 +1,61 @@
+Pixel 6 Pro (raven), iOS touch input through XNU, 2026-11-06. Boot raven-xnu10-touch.
+Result (observed by the user on the panel, same run): touch works on the iOS 16.7.16 lock screen, and every check asked
+for passed: taps near the corners of the visible screen, a swipe up from the very bottom of the glass (margin, clamped),
+two-finger touches, and touches landing under the finger.
+
+XNU console log of this run (read 2026-11-06 from LineageOS Recovery: last 1025 4K blocks of userdata ->
+logs/raven-touch-sweetlog.bin, sha256 d03097bc1222f998..., tools/sweetlog-decode.py -> logs/raven-touch-console.txt; banner
+"matt:xnu-8796.141.3" = the local build; logs/ is not in git). Observed:
+  - "gs101 sec_ts driver, mode 2, starting in 45 s": the ADT protocol property selected the sec_ts path.
+  - Handoff state as in the shim runs: USI11 mode 0, pads func 0, AP not driving the mux (driven low by sweettouchmux=1).
+  - Pokes (0146 boot-args, grammar m:ADDR=MASK=VAL): usi mux [0x10c00640] 0x10 -> 0 (read back 0);
+    div [0x10c0180c] 0 -> 5 (read back 0x10005; bit 16 set by the CMU, not written).
+  - SPI after setup: ch=0xc (mode 3), USI_CON 0, USI_OPTION 0x3; cs pad GPIO output high, clk/mosi/miso func 2.
+  - Reset: boot ev 09 00 10 00 00 00 00 00 on try 0 (boot complete, status_data_1 0x10 = not the watchdog case).
+  - Identify: DEVICE_ID 53 45 37 92 00, ID ac 37 92, boot status 0x20 (app), PANEL_INFO 1440x3120, tx 18 rx 39
+    (matches ADT max-coords 1439,3119, so raw coordinates map 1:1 to panel pixels).
+  - Enable: touch functions read 0x0061 (already TOUCH|PALM|WET), written 0x0061, SENSE_ON.
+  - Status events after sense on: 1d 61 02 02 03 .. and 1d 34 78 78 .. (VENDOR_INFO; 0x34 = SEC_TS_EVENT_STATUS_ID_REPORT_RATE,
+    sec_ts.h:784, data 0x78 = 120; 0x61 is not named in sec_ts.h). Logged and ignored, as intended.
+  - 43 finger-downs reported to SweetHID (finger 0: 23, finger 1: 20; finger 1 while finger 0 was down = two fingers),
+    21 of them in the panel margin outside the presented 1125x2436 (7 below its bottom edge, down to y=3119), all margin
+    contacts flagged edge; x reached 0 and 1439.
+  - No "FIFO read failed", no bad frame, no overflow, no watchdog line in the whole run: the error paths did not run.
+
+Change (branch wip/raven-sec-ts-xnu, on 1246f32 = xnu 0145; uncommitted at the time of the run):
+  xnu 0146 sweet-gs101-touch-sec-ts: /sweet-touch "protocol" = "sec_ts" selects the S6SY79x path in bsd/dev/sweet_touch_gs101.c;
+    pure framing/event decode in bsd/dev/sweet_sec_ts.h (sec_touch b23d1f8dfb9e, cites inline; shim/sweet_sec_ts_host_test.c).
+    SPI mode 3, PUD 0 + reset + boot-complete, DEVICE_ID / ID / BOOT_STATUS (app) / PANEL_INFO, SET_TOUCHFUNCTION |= 0x61,
+    SENSE_ON, then READ_ONE_EVENT / READ_ALL_EVENT polling. No "protocol" = FTM5, unchanged (bluejay ADT byte-identical).
+  xnu 0147 sweet-hid-touch-panel-size: panel size from PE_current_console; margin touches of the 1440x3120 panel clamp to the
+    presented 1125x2436 edge and count as edge contacts. 1080x2400 panels map as before [read from source].
+  tools/mkadt.py: raven gets /sweet-touch with protocol "sec_ts", no chip-id.
+
+Inputs
+  kernel: local build (hardware/local-xnu-build-2026-11-06.txt route), xnu/patches 0001-0147, sha256
+          ac9c9d9f3154620dc2eb1cefeb350de3e407770484691d7ad8000e41786556d4.
+  ADT:    tools/mkadt.py --board raven (with research/ipsw-x/d22ap.adt for /product), 16048 bytes.
+  args:   raven-xnu7 boot-args + sweettouchmux=1 sweettouchclk=3 sweettouchcs=1
+          sweettouchpoke=m:10c00640=10=0;d:100;m:10c0180c=f=5;   (USI mux bit 4 := 0, divider := 5: the shim's observed osc step)
+  shim:   build.sh --board raven --avb --boot-xnu --touch-probe=rails (rails LDO25M/LDO26M on before XNU).
+  image:  shim/out/raven-xnu10-touch/shim-boot-avb.img sha256 ec030e5e396d285e5a744dd92fe7b86309138535d04c565761dddf595652d387
+          (inputs in ~/pixelios-artifacts/raven-xnu10-touch/).
+
+Not yet: review by a different model family (AGENTS.md rule 8: stays on the local wip branch until then), CI build,
+bluejay boot with 0146/0147.
+Note: the bluejay poke example in the 0088 driver header and tools tests, m:10c00640=0=10;...;m:10c0180c=5=f;, has mask and
+value swapped for the poke grammar (m:ADDR=MASK=VAL, sweet_touch_poke.h): the mux op writes nothing [read from source].
+
+Run 2 (after review 1, same day): raven-xnu11-touch. Changes: 0146 F2 (unreported touch types ignored for every action), F3 (queue-full
+error event releases all fingers), F5 (log text), and /sweet-touch spi-fb-delay = 0 from raven's DT (hardware/spi11-dt-2026-11-06.txt).
+  kernel sha256 f61ff55dc6d21bad70aceadcb74810a6e5aad8e709b0ed6f32f82929258574cd, ADT 16088 bytes, same boot-args and shim flags,
+  image shim/out/raven-xnu11-touch/shim-boot-avb.img sha256 607c254f5c6d27df6d40c8fb6851a230976112c5548f439eabb9da85898e6232.
+  Observed by the user: touch works; the same checks pass (corners, swipe up from the bottom of the glass, two fingers, touch under
+  the finger).
+  XNU log (logs/raven-touch2-sweetlog.bin, sha256 e07a8d30077945ee..., decoded to logs/raven-touch2-console.txt): same identify
+  (DEVICE_ID 53 45 37 92 00, boot status 0x20, panel 1440x3120, functions 0061, boot ev on try 0); SPI after init ch=0xc fb=0;
+  57 events logged, 18 finger-downs to SweetHID (11 finger 0, 7 finger 1), 8 in the margin, 5 below the presented display;
+  no failure, timeout, overflow, queue-full or watchdog line.
+  Note (observed): run 1 (raven-xnu10, no spi-fb-delay) also read FB_CLK = 0 after the setup, although the sweettouchcs=1 setup
+  writes (FB_CLK & ~3) | 1. Guess: that write lands while USI_CON reset is still set (it is the third of the four ABL-order writes)
+  and does not stick. So both runs clocked with feedback delay 0; spi-fb-delay now writes it after the reset is released.
