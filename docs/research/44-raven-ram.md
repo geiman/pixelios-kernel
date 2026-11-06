@@ -51,14 +51,27 @@ A blocked UFS read would show as an I/O error or a hang; a blocked write (with `
 ## Result of step 1 (observed 2026-11-06, `device/google/raven/hardware/mem-s2mpu-2026-11-06.txt`)
 
 The HSI2 S2MPU is **off** at handoff: `CTRL0 = 0` (ENABLE clear), every L1 entry of all 8 VIDs reads 0, no fault recorded. It does not filter
-UFS DMA anywhere, so it does not limit XNU's RAM window. Step 2 is next.
+UFS DMA anywhere, so it does not limit XNU's RAM window.
+
+## Result of step 2 (observed 2026-11-06, `device/google/raven/hardware/ram-10g-2026-11-06.txt`)
+
+With `xnu_ram` = 10 GiB: read-only root panics at the root mount (expected without `ufsrw=1`, no log); with `--rw`, lock screen and touch,
+`vm_page_bootstrap: 650165 free pages, 5195 wired` (10 GiB managed, was 4 GiB), no new errors against the 4 GiB run. Still open (step 3):
+nothing in the log shows a page above `0x980000000` in use.
+
+## Result of step 3 (observed 2026-11-06, same record, runs 3-5)
+
+xnu patch 0148 (`sweetmemtest`) passed every new granule `0x26..0x2b` in at least one of three runs: 569,337 page tests through DRAM
+with 0 errors, and 11 UFS READs DMA'd straight into pages of those granules matching the bounce-buffer copy. Early in boot the allocator
+hands out pages bottom-up, so reaching the top granules needed a late start (60 s) and a low floor (2 GiB). Limits: one pattern pass per
+page, READ-direction DMA only. Conclusion: raven's XNU window is the whole 10 GiB high bank.
 
 ## Plan
 
 1. **Read-only probe of `s2mpu_hsi2` on raven** (shim). Reuse the read-only pattern and register map of `gpus2mpu.c` with a
-   new base: print CTRL0 (ENABLE) and the VID 0/1 L1 attrs of granules `0x20..0x2b`, guarded reads only, gated on the HSI2
-   power domain (`pd_hsi2_a/b`, `soc.json:24-25`), no MMIO store. Add `s2mpu_hsi2` to `soc.json` with its citation, a host
-   test, and the boot-safety audit like `gpuprobe.o`. Needs an independent review before it leaves `wip/` (it reads hardware).
+   new base: print CTRL0 (ENABLE) and the L1 attrs of all 8 VIDs x 64 granules, guarded reads only, no power gate (HSI2 is
+   never power-gated, `shim/wlanprobe.c` header), no MMIO store. Add `s2mpu_hsi2` to `soc.json` (`mem.s2mpu_hsi2`) with its
+   citation, a host test, and the boot-safety audit like `gpuprobe.o`. Done: `shim/memprobe.c` (`--mem-probe`). Needs an independent review before it leaves `wip/` (it reads hardware).
    Result decides step 2: disabled or all granules RD|WR = go; otherwise the usable granules bound the window.
 2. **Boot with a larger window, read-only root first.** `board.json` `xnu_ram` size `0x280000000` (10 GiB) on a wip branch,
    image with `tools/build-xnu-image.sh --board raven --kernel K --cpus 8 --gui --touch` *without* `--rw` (UFS read-only).

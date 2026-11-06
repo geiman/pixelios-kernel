@@ -1,0 +1,69 @@
+Pixel 6 Pro (raven), XNU with the whole 10 GiB high bank, 2026-11-06.
+Change: board.json xnu_ram ["0x880000000", "0x100000000"] -> ["0x880000000", "0x280000000"] (4 GiB -> 10 GiB, the merged high bank
+0x880000000..0xb00000000). Kernel: CI run 42240099790 (Xcode 16.0, sha256 ed7a5d4c...). Images by tools/build-xnu-image.sh --board raven
+--kernel K --cpus 8 --gui --touch [--rw], branch wip/raven-mem 44e0106 + the uncommitted xnu_ram change.
+
+Run 1, raven-xnu13-10g-ro (no --rw; image sha256 f1878535130cffceced469d482b809e7fc6657bc5dc84369f168acf02d68981e):
+  Observed (photo ~/git/pixel6/pics IMG_6806): XNU boots to launchd (fsck, mount, shared cache), then "mount_hfs: Read-only file system",
+  "mount: / failed with 1", "panic(cpu 2 caller 0xfffffe0007b21c6c): mount[3] exited -- no exit reason available -- (signal 0, exit status 1)".
+  Cause: the read-only root (UFS writes refused without ufsrw=1, read from source sweet_ufs.c:17); not memory. No persistent log: the
+  log is a UFS write (the log read from recovery afterwards was the previous run's, raven-xnu12-ci, ufsrw=1 in its boot-args).
+
+Run 2, raven-xnu14-10g-rw (--rw; image sha256 7923a0e759c2ff372dcd95ef33b4e065a7779826972175c057ba56ad08029f1e):
+  Observed by the user: lock screen, touch works.
+  XNU log (logs/raven-xnu14-10g-rw-sweetlog.bin, sha256 c56baece2c9533fc..., decoded with tools/sweetlog-decode.py):
+    vm_page_bootstrap: 650165 free pages, 5195 wired pages  = 655360 x 16 KiB = 10 GiB managed, 9.92 GiB free
+      (4 GiB runs: 258585 free + 3559 wired = 262144 pages); pmap_startup init 159 ms (4 GiB: 64 ms).
+    UFS read-write, DMA at 0x886a2c000; touch: panel 1440x3120, scanning; 5 finger-downs; SpringBoard and backboardd started; no panic.
+    The four error-looking lines (gPanicBase x2, UFS command 0x00 check condition, exec DumpPanic, driverkitd jetsam) appear equally in the
+    4 GiB run raven-xnu12-ci: pre-existing, not caused by the larger window.
+  Not shown: no physical address above 0x980000000 appears in the log, so nothing here proves that pages in the new 6 GiB were used, or
+  that UFS DMA works into them (the HSI2 S2MPU is off: hardware/mem-s2mpu-2026-11-06.txt). That needs a pressure test (docs/research/44 step 3).
+
+Run 3, raven-xnu15-memtest: xnu patch 0148 (sweetmemtest, uncommitted at the time; locally built kernel sha256
+3a33c24f1e439403fa8991cd9c530d161f1c9f9bdb955ab341036e06ac10d0f6), 10 GiB, --rw --gui --touch, sweetmemtest=1 (delay 60 s, cap 3 GiB,
+floor 5 GiB free). Image sha256 485bdbb12b4810246b2e10d9ec9cfc103d13567bcef10e24faafb769e99fa42b.
+  XNU log (logs/raven-xnu15-memtest-sweetlog.bin, sha256 929cfead2c860c19...): vm_page_bootstrap 650163 free + 5197 wired (10 GiB), no panic.
+    SWEET MEM: test start, RAM 0x880000000 + 0x280000000, new granules 0x26..0x2b, free pages 462232
+    SWEET MEM: allocated 64 x 32 MiB, 0 pages unmapped, free pages 327849
+    GB 0x22..0x26: pages 0
+    GB 0x27 pages 46119 tested 46119 errors 0 ufs-dma match (pa 0x9d2110000)
+    GB 0x28 pages 59562 tested 59562 errors 0 ufs-dma match (pa 0xa00f68000)
+    GB 0x29 pages 25391 tested 25391 errors 0 ufs-dma match (pa 0xa40cc0000)
+    GB 0x2a, 0x2b: pages 0
+    SWEET MEM: RESULT INCOMPLETE (0 granules with errors or a UFS mismatch, 3 not reached), free pages 462232 -> 458917
+  Observed: 2 GiB (131072 pages) in granules 0x27-0x29 pass the pattern test through DRAM, and a UFS READ DMA'd straight into a page of
+  each of those three granules equals the bounce-buffer copy. Not reached: 0x26, 0x2a, 0x2b. The allocation stopped at the 5 GiB-free
+  floor (iOS already used ~2.9 GiB at 60 s). Guess: XNU hands out free pages top-down, so iOS was already using 0x2a/0x2b and the test got
+  the next 2 GiB below; not checked.
+
+Run 4, raven-xnu16-memtest2: 0148 with the sweetmemtestgb / sweetmemtestfloor boot-args (kernel sha256
+37f562bdece0d1e7f1500d46076b52ea25298a54b2367a0434f639d8d0c3605e), boot-args sweetmemtest=1 sweetmemtestdelay=0 sweetmemtestgb=6
+sweetmemtestfloor=2. Image sha256 9d40b3d8e43a2461ecd6b317dadf9819536287099d75ed5f9b85363ae2189149.
+  XNU log (logs/raven-xnu16-memtest2-sweetlog.bin, sha256 067ccec86a38b647...): test start at line 135 (before SpringBoard), free pages 648535;
+    allocated 192 x 32 MiB (6 GiB); GB 0x22 58391, 0x23 64928, 0x24 64929, 0x25 64864 pages (old window, not tested);
+    GB 0x26 pages 58595 tested 58595 errors 0 ufs-dma match (pa 0x980d24000)
+    GB 0x27 pages 57892 tested 57892 errors 0 ufs-dma match (pa 0x9c1998000)
+    GB 0x28 pages 23617 tested 23617 errors 0 ufs-dma match (pa 0xa01108000)
+    GB 0x29..0x2b pages 0; RESULT INCOMPLETE (0 with errors or a mismatch, 3 not reached), free pages 648535 -> 600502.
+  Boot continued: SpringBoard, touch scanning, 9 finger-downs, no panic.
+  Observed: early in boot the allocator hands out pages bottom-up (the run-3 "top-down" guess was wrong); together runs 3 and 4 pass
+  granules 0x26, 0x27, 0x28, 0x29 (CPU pattern through DRAM and UFS READ DMA). Still untested: 0x2a, 0x2b (the top 2 GiB).
+
+Run 5, raven-xnu17-memtest3: same kernel as run 4, boot-args sweetmemtest=1 sweetmemtestdelay=60 sweetmemtestgb=6 sweetmemtestfloor=2.
+Image sha256 a2895350cb59a26404b16dded3d8e1666f9d3d62d233e1ad17a80fdd1e58a6d7.
+  XNU log (logs/raven-xnu17-memtest3-sweetlog.bin, sha256 c485f2a6467762f4...): free pages 453976 at the start; allocated 156 x 32 MiB (4.9 GiB,
+    stopped at the 2 GiB floor); GB 0x22 16325, 0x23 5002 pages (old window); GB 0x24..0x26 0;
+    GB 0x27 pages 47019 tested 47019 errors 0 ufs-dma match (pa 0x9d3bbc000)
+    GB 0x28 pages 65376 tested 65376 errors 0 ufs-dma match (pa 0xa00158000)
+    GB 0x29 pages 63776 tested 63776 errors 0 ufs-dma match (pa 0xa403d8000)
+    GB 0x2a pages 61539 tested 61539 errors 0 ufs-dma match (pa 0xa82458000)
+    GB 0x2b pages 60451 tested 60451 errors 0 ufs-dma match (pa 0xac1dcc000)
+    RESULT INCOMPLETE (0 with errors or a mismatch, 1 not reached: 0x26), free pages 453976 -> 450812. SpringBoard, touch (14
+    finger-downs), no panic; the only jetsam line is driverkitd at boot, as in every run.
+
+COMBINED (runs 3-5, observed): every granule of the new 6 GiB, 0x26..0x2b, passed in at least one run, with no error anywhere:
+  0x26 run 4; 0x27 runs 3, 4, 5; 0x28 runs 3, 4, 5; 0x29 runs 3, 5; 0x2a run 5; 0x2b run 5. In total 569,337 page tests (16 KiB each:
+  a PA-derived pattern written, cleaned+invalidated to DRAM, read back) with 0 errors, and 11 UFS READs DMA'd straight into pages of
+  these granules, all equal to the bounce-buffer copy. Limits: one pass of one pattern per page (not a stress or retention test); UFS
+  DMA checked with READ only (device-to-memory), one page per granule per run.
