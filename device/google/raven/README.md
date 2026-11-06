@@ -39,4 +39,8 @@ SoC: `soc/google/gs101`, shared with bluejay, so every SoC-level value (GIC, tim
    on the 1440x3120 panel, passes its self-tests, finds `userdata` read-only over UFS (DMA in high RAM) and retries the root mount,
    since userdata holds LineageOS data. Needed `shim_align_payload`: LineageOS's vendor ramdisk leaves the payload unaligned.
 
-4. **launchd and beyond** need an iOS root in `userdata`, which erases Android's data there; then touch (`sec_ts`) for raven.
+4. **iOS GUI.** **Done 2026-11-05** (`hardware/ios-gui-2026-11-05.txt`): iOS 16.7.16 lock screen on the panel. Needs: the iOS root
+   flashed to `userdata` (as a sparse image on macOS), `/product` from the IPSW's D22AP device tree, the framebuffer presenting
+   1125x2436 (today a binary patch of the CI kernel; to become an XNU patch), and a first boot on a fresh root.
+
+5. **Next:** touch (`sec_ts`, S6SY79x), the framebuffer fix as an XNU patch, more RAM, then Wi-Fi/GPU.

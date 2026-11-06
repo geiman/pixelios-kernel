@@ -2,7 +2,7 @@
   "name": "Pixel 6 Pro",
   "codename": "raven",
   "soc": "google/gs101",
-  "status": "XNU boots to the root mount (2026-11-05, 1 CPU, no iOS root yet)",
+  "status": "iOS 16.7.16 lock screen (2026-11-05, 8 CPUs; no touch yet)",
   "dram_banks": [
     ["0x80000000", "0x37200000"],
     ["0xc0000000", "0x20000000"],

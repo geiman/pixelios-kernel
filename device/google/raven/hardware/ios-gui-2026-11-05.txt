@@ -1,0 +1,21 @@
+Pixel 6 Pro (raven), iOS 16.7.16 GUI, 2026-11-05.
+Result (observed by the user on the panel): the iOS lock screen, after the Apple logo. Boot raven-xnu7.
+
+Inputs
+  root:   iPhone10,3 16.7.16 (20H392) IPSW, built on macOS with pixelios-userland tools/build-ios-root-macos.sh
+          (16 GiB HFSX, sha256 7ca81f71b904e2d1417c60d506bf854b4e34f10a2b9f656af32df2225638d8c2; check-ios-root.py 12/12),
+          flashed as a zero-filled Android sparse image (fastboot on macOS fails on the 16 GiB raw file: "Failed reading from userdata").
+  kernel: PixOS CI run 40326139140 (04457e5) with two instructions NOPed in AppleCLCD::start (0xfffffe0007a8c730, ...740: the
+          "panel wider/taller than 1125x2436" branches of patch 0060), sha256 7ddcf810c5c7587e9195d360e66e1d66071abcc1321c3f0746d2969cdaa222f6.
+          TEST HACK: needs a real XNU patch.
+  ADT:    tools/mkadt.py --board raven with research/ipsw-x/d22ap.adt (DeviceTree.d22ap.im4p from the same IPSW, LZFSE) -> /product.
+  args:   cpus=8 rd=ufsroot0 ufsrw=1 rootrw=1 sweetfb_noconsole=1 sweetfb_hz=30 (+ build-xnu-image.sh defaults).
+
+What it took (each seen in the persistent console log, tools/sweetlog-decode.py, read from recovery)
+  1. raven-xnu5: black screen. iOS ran 8+ min, but the driver presented 1440x3120 (patch 0060 only presents 1125x2436 on
+     panels <= that size): every backboardd frame all-zero. -> kernel hack above: "presented as 1125x2436".
+  2. raven-xnu6: Apple logo, then black. SpringBoard aborted every ~7 s (76x): 'Failed to load bounding path bitmap data ...
+     BoundingPathBitmap-1125x2436-375x812-3.00x' (PixOS research 37): the ADT had no /product. -> d22ap.adt added.
+  3. raven-xnu7 on the same root: same abort (45x) although SpringBoard now saw IODeviceTree:/product. Guess: MobileGestalt answers
+     cached by the earlier runs on the read-write root. -> reflashed the pristine root, booted raven-xnu7: lock screen.
+     (The cache explanation is a guess: it fits, it was not read from the old root.)

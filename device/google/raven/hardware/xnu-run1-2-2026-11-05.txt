@@ -21,3 +21,9 @@ Run 2 (shim/out/raven-xnu2, shim_align_payload fix): XNU boots to the root mount
   SWEET KEYS: 3 keys, active-low=1, first read in 30 s
   BSD root: ufsroot0, major 1, minor 0; hfs_ValidateHFSPlusVolumeHeader: unknown Volume Signature : e965; hfs_mountfs error=22
   cannot mount root, errno = 19; mount(2..5) failed, retrying (expected: userdata holds LineageOS data, not an HFS root)
+
+Run 3 (shim/out/raven-xnu3, cpus=8 sweetrestart=150,bootloader): all eight CPUs.
+  SWEET CPU: requested=8 selected=8 (limit=8); cpus 1-7 PSCI CPU_ON rc=0 target 0x100..0x700, entry_pa 0x88149a000, each EL1, SGI1 OK
+  MIDR cpu0-3 0x412fd050 (A55, clock probe ~1196 MHz), cpu4-5 0x414fd0b0 (A76, ~1196 MHz), cpu6-7 0x411fd440 (X1, ~1105 MHz)
+  SWEET CPU: 8/8 CPUs initialized, SGI1 verified; mcache: 8 CPU(s); same root-mount retry as run 2 (UFS DMA at 0x884b98000)
+  sweetrestart did not fire: patch 0083/0086 poll it only from the persistent-log thread (needs a mounted root) and the QR thread.
