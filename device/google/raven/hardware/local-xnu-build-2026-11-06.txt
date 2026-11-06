@@ -1,0 +1,28 @@
+Pixel 6 Pro (raven), locally built XNU kernel, 2026-11-06. Boot raven-xnu8-local.
+Result (observed by the user on the panel): the iOS 16.7.16 lock screen, after about 2 min (raven-xnu7 took about 10-12 min).
+Why the boot was faster is not known. Guess: caches written on the root by the raven-xnu7 run (same root, read-write, not
+reflashed since). Not checked; the kernel is functionally the same build (below).
+
+Build route (route A: local, Xcode 15; nothing pushed)
+  blacktop/darwin-xnu-build @ 663906528d1c (as .github/workflows/xnu.yml), same libfirehose arm64 sed, xnu/patches/*.patch + *.sh
+  from df8e3eb (xnu/ identical to CI commit 04457e5). DEVELOPER_DIR=/Applications/Xcode-15.4.0.app (15F31d), a stub `xcodes`
+  on PATH, MACOS_VERSION=13.5 KERNEL_CONFIG=DEVELOPMENT MACHINE_CONFIG=SWEET. KDK 13.5 22G74 (dortania mirror) extracted with
+  pkgutil --expand-full and passed as KDKROOT (build.sh honours it), so no sudo. Build time about 3 min on this Mac.
+  All project patches applied; the 4 upstream dxb patches that do not fit 13.5 were skipped (warning lines, as expected).
+  Machine on the host: macOS 27 (Darwin 27.0.0); Xcode 27 stays the default (xcode-select unchanged).
+
+Comparison with CI run 40326139140 (Xcode 15.0.1, 15A507, from the run log)
+  unpatched kernel sha256 70eab3c556258d9e... (CI: 26d6679ce244447...): same 71267 defined symbols;
+  __cstring 4374 B smaller = 243 __FILE__ paths x 18 chars shorter build path; __text 572 B larger (compiler 15.4 vs 15.0.1).
+  AppleCLCD::start: identical code; the two b.hi of kernel-raven-logical NOPed at func+0xC0, +0xD0 (bytes 08020054,
+  c8010054 checked first) -> kernel sha256 324d218aca2a45e8d5a7f951532ae6e0aa2976f2c6727381487f452194ccb059.
+
+Image
+  payload: tools/mkpayload.py --board raven, raven-xnu7 ADT and boot-args (the same command reproduces raven-xnu7's
+  payload.bin byte for byte). sha256 b7c9bc9e09491168...
+  shim: clean df8e3eb worktree, shim/build.sh --board raven --avb --boot-xnu (META_ARGS, XNU_UFS=1); differs from the
+  raven-xnu7 image only in the PSTORE build id string (795b2ee -> df8e3eb) and what follows from it.
+  shim/out/raven-xnu8-local/shim-boot-avb.img sha256 b97f7485bea94236bbbd710672bb5fd87d2e32ac1538dc434a96666cbd14db81
+  Inputs and notes: ~/pixelios-artifacts/raven-xnu8-local/.
+
+Next: replace the AppleCLCD NOP hack with a real XNU patch (now buildable locally), then the sec_ts driver.

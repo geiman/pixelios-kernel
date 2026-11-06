@@ -1,0 +1,23 @@
+SWEET framebuffer on a panel larger than 1125x2436 (raven 1440x3120): present 1125x2436 centred 1:1 instead of the native size, unless sweetfb_native=1. Replaces the two NOPs in AppleCLCD::start of the raven-xnu7 test kernel; panels <= 1125x2436 (sweet, bluejay) take the same path as before.
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -77,6 +77,9 @@ enum {
+  * rdar://45025538 bar for 360x800 points). The display is therefore
+  * presented as the iPhone X panel, 1125x2436 (375x812 points @3x), and the
+  * centered 1080x2400 part of it is shown on the 1080x2400 panel.
++ * A larger panel (raven, 1440x3120) gets the same 1125x2436 display, drawn
++ * 1:1 in its centre: a native 1440x3120 display got all-zero frames from
++ * backboardd (raven-xnu5, device/google/raven/hardware/ios-gui-2026-11-05.txt).
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
+  */
+ #define SWEET_FB_LOGICAL_W              1125
+@@ -219,7 +222,8 @@ AppleCLCD::start(IOService *provider)
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+-	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
++	/* On a larger panel fOffX/fOffY are negative: present() (dx -= fOffX) then shifts each layer into the panel's centre. */
++	if (!native) {
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}

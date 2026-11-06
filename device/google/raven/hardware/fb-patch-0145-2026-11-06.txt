@@ -1,0 +1,16 @@
+Pixel 6 Pro (raven), xnu patch 0145 (framebuffer presents 1125x2436 on a larger panel), 2026-11-06. Boot raven-xnu9-0145.
+Result (observed by the user on the panel): the iOS 16.7.16 lock screen. No binary patch in the kernel.
+
+Change: 0145-sweet-fb-present-larger-panel.patch drops the "panel <= 1125x2436" condition of patch 0060 in AppleCLCD::start,
+so every panel is presented as 1125x2436 unless sweetfb_native=1. On raven fOffX/fOffY = -157/-342 [read from source:
+(int32_t)(1125 - 1440) / 2, (int32_t)(2436 - 3120) / 2] and present() shifts each layer into the panel's centre.
+Panels <= 1125x2436 (bluejay, sweet: 1080x2400) took this branch already: same behaviour [read from source; not booted on bluejay].
+Replaces the two NOPs of kernel-raven-logical (raven-xnu7). Disassembly of the built kernel: with sweetfb_native unset,
+fLogicalW/H := 1125/2436 unconditionally (same effect as the NOPs); defined symbol set unchanged (71267).
+
+Kernel: local build (hardware/local-xnu-build-2026-11-06.txt route), clean tree, xnu/patches 0001-0145 (df8e3eb stack + 0145),
+  tools/stack-apply PASS (134/134 patches + 3 stagers). kernel.development.sweet sha256
+  34a73d11106bbfc17f1ab456ef1a7b36523c680fcd82299a559736537a6dadd8.
+Image: raven-xnu7 ADT + boot-args, mkpayload --board raven, df8e3eb shim. shim/out/raven-xnu9-0145/shim-boot-avb.img sha256
+  17df94a4f0d0feb6b3b1849cdd716b0df625c6d982c403da60aad0425ae55b15. Inputs: ~/pixelios-artifacts/raven-xnu9-0145/.
+Not yet: CI build of 0145 (needs a push), bluejay boot with 0145, review by another model family.
