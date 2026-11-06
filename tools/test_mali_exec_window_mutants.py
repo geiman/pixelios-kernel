@@ -73,7 +73,8 @@ def new_file(patch, path):
 def file_diff(patch, path):
     """The diff of one file in a patch: from its '--- ' / '+++ b/<path>' pair to the next file's pair or 'diff --git' line.
     Works with and without 'diff --git' headers (0109 has none). Raises if the patch does not touch the file."""
-    lines = open(patch, encoding="utf-8").read().split("\n")
+    with open(patch, encoding="utf-8") as fh:
+        lines = fh.read().split("\n")
     out, on = [], False
     for n, line in enumerate(lines):
         starts = line.startswith("--- ") and n + 1 < len(lines) and lines[n + 1].startswith("+++ ")
