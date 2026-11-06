@@ -7,6 +7,10 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+/* Apple clang does not know gcc's noipa (kept literal in wlansmc.c: the object/source audit checks it); -Werror would stop the host test. */
+#ifdef __clang__
+#pragma clang diagnostic ignored "-Wunknown-attributes"
+#endif
 #include "wlansmc.c"
 
 #if !(SOC_GS101 && defined(WLAN_PMU_PCIE1_ISO) && defined(WLAN_ISO_RUN))
